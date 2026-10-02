@@ -1,0 +1,25 @@
+# 真实配置含 AppSecret / API Key / bcrypt 密码哈希，绝不入库
+/config.json
+/config.json.bak
+/config.json.*.tmp
+
+# 运行数据（bbolt 库、日志落盘等）
+/data/
+
+# 编译产物
+/dadyumo-qqbot
+/dadyumo-qqbot.exe
+/dist/
+
+# 语料与分析文档（含群聊记录与成员 openid，不入库）
+/docs/
+
+# 本地 AI 工具配置：含真实 API Key，绝不入库
+/.claude/
+/.workbuddy/
+
+# 本地临时文件
+*.log
+.DS_Store
+
+happycoder.bat

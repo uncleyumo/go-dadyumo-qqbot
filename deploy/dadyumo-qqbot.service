@@ -1,0 +1,41 @@
+[Unit]
+Description=dadyumo-qqbot - 羽沫老爹（QQ 群聊智能群友）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 若把项目装在 /opt 下，普通用户即可运行，建议改成非 root：
+#   User=dadyumo
+#   Group=dadyumo
+# 保持默认 root 是因为很多人会把项目放/root 下（权限 700），非 root 进不去。
+User=root
+Group=root
+WorkingDirectory=/opt/dadyumo-qqbot
+ExecStart=/opt/dadyumo-qqbot/dadyumo-qqbot -config /opt/dadyumo-qqbot/config.json
+
+# 常驻服务：任何异常退出都拉起来
+Restart=always
+RestartSec=5
+
+# 程序自己处理 SIGTERM 做优雅退出（会先保存长期记忆），给足时间
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# 最小权限加固。若工作目录在 /root 下，ProtectHome=read-only 会让程序读不到
+# 自己的配置，此时把下面这行改成 ProtectHome=false。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+# 环境变量可在这里注入，例如代理
+# Environment="HTTPS_PROXY=http://127.0.0.1:7890"
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dadyumo-qqbot
+
+[Install]
+WantedBy=multi-user.target

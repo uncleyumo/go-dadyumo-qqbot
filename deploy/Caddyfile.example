@@ -1,0 +1,39 @@
+# 把下面这段合并进服务器的 Caddyfile（通常是 /etc/caddy/Caddyfile），然后：
+#   sudo systemctl reload caddy
+#
+# 说明：
+#   - QQ 开放平台强制 HTTPS，且回调端口只认 80/443/8080/8443，所以必须走 443 反代。
+#   - 管理端在程序里只监听 127.0.0.1:8081，公网不可直达，这里再叠一层 basic auth 双保险。
+#   - 子域名要和 QQ 开放平台后台填的回调地址保持一致。
+#   - 改完先备份：sudo cp /etc/caddy/Caddyfile /etc/caddy/bk/Caddyfile.$(date +%Y%m%d-%H%M)
+#   - 校验语法：sudo caddy validate --config /etc/caddy/Caddyfile
+
+# ↓↓↓ 换成你自己的子域名（必须与 QQ 开放平台后台填的一致）
+bot.example.com {
+	encode gzip
+
+	# QQ 回调：路径要和 config.json 里的 server.webhook_path 一致
+	handle /qq/callback {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# 管理端。密码用 `caddy hash-password` 生成后替换下面那串
+	handle /admin/* {
+		basic_auth {
+			admin $2a$14$REPLACE_WITH_YOUR_OWN_BCRYPT_HASH_HERE_0000000000000000
+		}
+		reverse_proxy 127.0.0.1:8081
+	}
+
+	handle /healthz {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	handle {
+		respond "dadyumo-qqbot" 200
+	}
+
+	log {
+		output file /var/log/caddy/dadyumo-qqbot.log
+	}
+}

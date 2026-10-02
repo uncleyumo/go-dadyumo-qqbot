@@ -1,0 +1,23 @@
+# dadyumo-qqbot（羽沫老爹）— QQ 官方回调
+# 回调地址：https://bot.example.com/qq/callback← 换成你自己的子域名
+bot.example.com {
+	# QQ 开放平台回调（强制 HTTPS + 443）
+	handle /qq/callback* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# 健康检查
+	handle /healthz* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# 管理端默认只监听 127.0.0.1:8081，不对外暴露。
+	# 需要公网访问时取消下面三行注释，然后 systemctl reload caddy
+	# handle /admin/* {
+	#	reverse_proxy 127.0.0.1:8081
+	# }
+
+	handle {
+		respond "羽沫老爹在线" 200
+	}
+}

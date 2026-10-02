@@ -1,0 +1,720 @@
+// Package agent 是事件入口：把 QQ 回调事件归一化后交给 brain 决策，
+// 并负责把决策结果真正发出去。
+//
+// 这一层刻意保持很薄——所有「要不要说话、说什么、分几条发」的判断都在 brain 里，
+// 这里只做协议适配（事件结构 → 内部 Event）和发送通道。
+package agent
+
+import (
+	"context"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"dadyumo/internal/brain"
+	"dadyumo/internal/config"
+	"dadyumo/internal/logx"
+	"dadyumo/internal/memory"
+	"dadyumo/internal/qqapi"
+	"dadyumo/internal/webhook"
+)
+
+// c2cPrefix 单聊会话在内部也当成一个「群」来处理，用前缀区分
+const c2cPrefix = "c2c:"
+
+// Agent 实现 webhook.Handler 与 brain.Sender
+type Agent struct {
+	store  *config.Store
+	qq     *qqapi.Client
+	mem    *memory.Store
+	engine *brain.Engine
+
+	mu       sync.Mutex
+	lastText map[string]string // 会话 -> 上次发出的内容，用于兜底去重
+}
+
+// New 创建 Agent
+func New(store *config.Store, qq *qqapi.Client, mem *memory.Store, engine *brain.Engine) *Agent {
+	return &Agent{
+		store:    store,
+		qq:       qq,
+		mem:      mem,
+		engine:   engine,
+		lastText: map[string]string{},
+	}
+}
+
+// SetEngine 回填决策引擎。
+// Agent 既是 engine 的发送通道、又要调用 engine，构造上是个环，只能分两步装配。
+func (a *Agent) SetEngine(e *brain.Engine) { a.engine = e }
+
+// OnGroupMessage 处理群消息
+func (a *Agent) OnGroupMessage(ev *webhook.GroupMessage, atMe bool) {
+	if ev == nil || ev.Author == nil {
+		return
+	}
+	cfg := a.store.Get()
+
+	groupID := ev.GroupOpenID
+	if groupID == "" {
+		return
+	}
+	// 群名回调里没有，只能从配置里认；认不出来就用 openid 的尾号，日志里好分辨
+	groupName := groupNameOf(cfg, groupID)
+	if !groupEnabled(cfg, groupID) {
+		logx.Debug("该群未启用，已忽略", "group", groupID)
+		return
+	}
+
+	openID := ev.Author.MemberOpenID
+	if openID == "" {
+		openID = ev.Author.UserOpenID
+	}
+	if openID == "" {
+		openID = ev.Author.ID
+	}
+	name := displayName(ev.Author.Username, openID)
+
+	content := normalizeContent(ev)
+	rawContent := content // 清洗前的平台原文，只用于日志对照
+	mentionTarget := ""
+
+	// 群主开启「全量消息」后，@机器人 也不再走 GROUP_AT_MESSAGE_CREATE 事件，
+	// 而是混在 GROUP_MESSAGE_CREATE 里。判断「这条在跟谁说话」有两个来源：
+	//
+	//  1. mentions 数组——平台唯一结构化的「消息 @ 了谁」信号，最可靠。
+	//     顺带把被 @ 到的其他群友登记进成员表：这是白得的「谁在群里叫什么」。
+	//  2. content 里的 <@openid> 标签——平台只承诺剥掉 @机器人 的前缀，
+	//     对 @他人 的残留格式没有任何承诺，只能当兜底。
+	mentionsMe, others := parseMentions(ev.Mentions, cfg.QQ.SelfOpenID)
+	if len(others) > 0 {
+		g := a.mem.Group(groupID, groupName)
+		for oid, nm := range others {
+			g.TouchMemberCard(oid, displayName(nm, oid))
+		}
+		// 取「第一个被 @ 的人」时必须按平台给的顺序，不能遍历 others 这个 map——
+		// Go 的 map 遍历顺序是随机的，一条 @ 了两个人的消息，
+		// 上一轮回给 A、这一轮可能就回给 B 了。这里走 ev.Mentions 的原始下标。
+		for _, u := range ev.Mentions {
+			if u == nil {
+				continue
+			}
+			oid := u.MemberOpenID
+			if oid == "" {
+				oid = u.UserOpenID
+			}
+			if oid == "" {
+				oid = u.ID
+			}
+			if oid != "" && oid != cfg.QQ.SelfOpenID {
+				if _, ok := others[oid]; ok {
+					mentionTarget = oid
+					break
+				}
+			}
+		}
+	}
+	// mentions 是唯一可靠的「@了谁」，但只覆盖结构化字段。正文里的
+	// <@openid>/<@all>/表情标记是平台塞进来的原文，必须翻译掉再往下走，
+	// 否则模型看到的是 32 位十六进制和 base64，认不出人是谁、也读不出表情。
+	// openid → 昵称。机器人自己映射成人设名，@到的群友用 mentions 里的
+	// username；认不出来的返回空，cleanTags 会把那个标签整个删掉。
+	nameOf := func(oid string) string {
+		if oid == "" {
+			return ""
+		}
+		if oid == cfg.QQ.SelfOpenID {
+			return cfg.Persona.Name
+		}
+		if nm, ok := others[oid]; ok {
+			return displayName(nm, oid)
+		}
+		return ""
+	}
+	content, atAll := cleanTags(content, nameOf)
+	// @全体成员 平台既不给 mentions 条目、也不置 at=true，只在正文留一个
+	// <@all> 标签。它包含机器人，但「群里有人 @ 全员」通常不是在问它，
+	// 所以不当成 atMe——只把这个事实如实记进上下文，让模型自己判断要不要接。
+	if mentionsMe && !atMe {
+		atMe = true
+	}
+	// 机器人没被 @、但这条明确 @ 了别人：被 @ 的那个人才是这轮该回的对象，
+	// 比「最后一条说话的人」准得多（群里常常是 A 在说、顺手 @ B 让他答）。
+	// 若 @ 的正是机器人自己，回的是说话人而不是被 @ 的人，所以要排除。
+	if !atMe && mentionTarget != "" && mentionTarget == cfg.QQ.SelfOpenID {
+		mentionTarget = ""
+	}
+
+	logx.InfoCat(logx.CatChat, "群消息", buildGroupLogFields(groupName, name, atMe,
+		content, rawContent, atAll, mentionTarget, nameOf,
+		quotedPreview(ev.MsgElements))...)
+
+	// 能收到这个群的消息说明机器人还在群里：清掉可能的「已退群」旧标记
+	//（比如被移出后又被拉回来，但重新入群事件丢失的场景）
+	if g := a.mem.Group(groupID, groupName); g != nil {
+		if left, _ := g.Left(); left {
+			g.SetLeft(false)
+			logx.Info("群内再次收到消息，清除已退群标记", "group", groupName)
+		}
+	}
+
+	// 机器人自己的消息不进触发逻辑，避免自我回复循环
+	if ev.Author.Bot {
+		a.mem.Group(groupID, groupName).Append(memory.Line{
+			TS: parseTS(ev.Timestamp), Role: memory.RoleBot, Content: content, OpenID: openID,
+		}, cfg.Brain.MaxHistory)
+		return
+	}
+
+	// 说话人登记进成员表，用的是 **author 给的账号昵称**。
+	//
+	// 这一步以前没有，于是成员表里只剩群名片（只有被别人 @ 时才拿得到），
+	// 主名是「群名片丁」而不是他自称的「群友乙」。
+	// author 和 mentions 是平台两个不同字段给的两种名字，语义不同，
+	// 必须分开写：见 Member.Card 的说明。
+	a.mem.Group(groupID, groupName).TouchMember(openID, name)
+
+	// 只有真人的消息才能作为被动回复的锚点。
+	// 必须带上发送者：回复挂到谁的消息下，决定了群里看起来是在跟谁说话。
+	a.qq.Anchors().Add(groupID, ev.ID, openID, name)
+
+	// 被 @ 之外，直接叫名字也算在跟它说话
+	if !atMe {
+		atMe = mentions(content, cfg.Persona.Name)
+	}
+
+	imgs, quotedText, quotedPic, quotedOpenID, quotedName := parsePics(ev)
+
+	// 视频/语音/引用都要记住是谁发的：模型要能说「这是谁发的」，
+	// 发送层也要能把这轮回复挂回这个人。
+	videos := make([]brain.MediaRef, 0, len(ev.Attachments))
+	for _, u := range videoURLs(ev.Attachments) {
+		videos = append(videos, brain.MediaRef{OpenID: openID, Name: name, URL: u})
+	}
+	voices := voiceRefs(ev.Attachments, openID, name)
+
+	a.engine.OnMessage(&brain.Event{
+		GroupID:            groupID,
+		GroupName:          groupName,
+		MsgID:              ev.ID,
+		OpenID:             openID,
+		Name:               name,
+		Content:            content,
+		Images:             imgs,
+		QuotedPics:         quotedPic,
+		Videos:             videos,
+		Voices:             voices,
+		Quoted:             quotedText,
+		QuotedFrom:         name,
+		QuotedFromOpenID:   openID,
+		QuotedAuthor:       quotedName,
+		QuotedAuthorOpenID: quotedOpenID,
+		MentionTarget:      mentionTarget,
+		AtAll:              atAll,
+		AtMe:               atMe,
+		IsBot:              false,
+		TS:                 parseTS(ev.Timestamp),
+	})
+}
+
+// parsePics 从一条回调里把「这条消息自己带的图」和「被引用的那条消息里的图」
+// 分成两路，顺带把引用文本和原作者带出来。
+//
+// **图必须分开，不能合并。** 下游只按「这条消息的发送人」给 Images 记账，
+// 把引用的图混进去就等于告诉模型「这是他发的」——可他只是引用了别人。
+// 2026-10-02 实况：有人引用别人半小时前发的一张图问「这谁？」，
+// 机器人答「你自己发的你问我？」。
+//
+// 引用里的图归**被引用的原作者**（authorOpenID/authorName）。
+// 原作者认不出来就留空，下游会显示成「有人」——宁可说不出是谁，
+// 也不能赖到引用的人头上。
+//
+// 合成一个函数而不是拆成 extractQuoted + splitPics 两步：拆开时测试只能
+// 直接调工具函数，调用点那句「谁传给谁」没人管——把合并改回去测试照样全绿
+// （这个假绿真踩过一次）。
+func parsePics(ev *webhook.GroupMessage) (imgs []string, quotedText string,
+	quotedPics []brain.MediaRef, authorOpenID, authorName string) {
+
+	quotedText, quotedImgs, oid, nm := extractQuoted(ev.MsgElements)
+	authorOpenID, authorName = oid, nm
+	imgs = imageURLs(ev.Attachments)
+	quotedPics = make([]brain.MediaRef, 0, len(quotedImgs))
+	for _, u := range quotedImgs {
+		quotedPics = append(quotedPics, brain.MediaRef{OpenID: oid, Name: nm, URL: u})
+	}
+	return imgs, quotedText, quotedPics, authorOpenID, authorName
+}
+
+// imageURLs 从事件附件里挑出图片类附件的下载地址。
+// 表情包、截图、照片在平台侧都是附件，contentType 以 image/ 开头。
+func imageURLs(atts []*webhook.Attachment) []string {
+	if len(atts) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(atts))
+	for _, a := range atts {
+		if a == nil {
+			continue
+		}
+		// 有些事件只给 contentType，有些只给文件名，两边都认
+		isImg := strings.HasPrefix(strings.ToLower(a.ContentType), "image/")
+		if !isImg {
+			ext := strings.ToLower(filepath.Ext(a.FileName))
+			isImg = ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif" || ext == ".webp" || ext == ".bmp"
+		}
+		if !isImg {
+			continue
+		}
+		if a.URL != "" {
+			out = append(out, a.URL)
+		}
+	}
+	return out
+}
+
+// videoURLs 从事件附件里挑出视频附件的下载地址。
+// 平台给视频的 contentType 形如 video/mp4；有的事件不带 contentType 只带文件名，
+// 所以和图片一样两边都认。引用消息里的视频不收——引用链上的媒体本来就少见，
+// 转写一份视频的成本又高，不值得。
+func videoURLs(atts []*webhook.Attachment) []string {
+	if len(atts) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(atts))
+	for _, a := range atts {
+		if a == nil {
+			continue
+		}
+		isVideo := strings.HasPrefix(strings.ToLower(a.ContentType), "video/")
+		if !isVideo {
+			ext := strings.ToLower(filepath.Ext(a.FileName))
+			isVideo = ext == ".mp4" || ext == ".mov" || ext == ".avi" || ext == ".mkv" || ext == ".webm"
+		}
+		if !isVideo {
+			continue
+		}
+		if a.URL != "" {
+			out = append(out, a.URL)
+		}
+	}
+	return out
+}
+
+// voiceRefs 挑出平台没给转写文本、但留了音频下载地址的语音消息，交给 ASR 兜底。
+// 平台给了 asr_refer_text 的语音已经在 normalizeContent 里拼进正文了，这里不管。
+// 转写不在这里做：回调是同步派发的，阻塞几秒做转写会拖慢回包被平台重推，
+// 真正的转写攒到决策引擎 fire() 时才发生。
+func voiceRefs(atts []*webhook.Attachment, senderOpenID, sender string) []brain.VoiceRef {
+	if len(atts) == 0 {
+		return nil
+	}
+	var out []brain.VoiceRef
+	for _, a := range atts {
+		if a == nil || a.ContentType != "voice" {
+			continue
+		}
+		if strings.TrimSpace(a.ASRReferText) != "" || a.VoiceWavURL == "" {
+			continue
+		}
+		out = append(out, brain.VoiceRef{OpenID: senderOpenID, Name: sender, URL: a.VoiceWavURL})
+	}
+	return out
+}
+
+// buildGroupLogFields 拼出「群消息」这行日志的 kv。
+//
+// 原文和清洗结果一起打：只看清洗后的没法判断是模型认错了还是这里解析错了，
+// 只看原文又看不出模型到底读到了什么。控制台日志页把两栏上下排着，
+// 出现平台标记（说明清洗漏了）或两边长度差很多，都一眼看得见。
+//
+// 单独抽成函数是为了能直接测：OnGroupMessage 依赖真实 qqapi 客户端做锚点登记，
+// 为了验一行日志去起整个 Agent 不划算。
+func buildGroupLogFields(group, from string, atMe bool,
+	content, rawContent string, atAll bool, mentionTarget string,
+	nameOf func(string) string, quoted ...string) []any {
+
+	fields := []any{
+		"group", group, "from", from, "at", atMe,
+		"text", truncate(content, 200),
+	}
+	if rawContent != content {
+		fields = append(fields, "原文", truncate(rawContent, 200))
+	}
+	if atAll {
+		fields = append(fields, "@全体", true)
+	}
+	if mentionTarget != "" {
+		if n := nameOf(mentionTarget); n != "" {
+			fields = append(fields, "@给", n)
+		}
+	}
+	if len(quoted) > 0 && quoted[0] != "" {
+		fields = append(fields, "引用", truncate(quoted[0], 80))
+	}
+	return fields
+}
+
+// quotedPreview 生成一行给人看的引用摘要：谁引用了谁的什么话。
+//
+// 排查「回复挂错人」时最缺的就是这个：日志里只看到「某人发了条消息」，
+// 看不到他引用的是谁。历史上认错人的案子有一大半是引用链没读对。
+// 只给日志用，不进模型上下文（模型那边走 Event.Quoted 等结构化字段）。
+func quotedPreview(els []*webhook.MsgElement) string {
+	text, _, authorOpenID, authorName := extractQuoted(els)
+	if text == "" {
+		return ""
+	}
+	who := authorName
+	if who == "" {
+		who = shortID(authorOpenID)
+	}
+	if who == "" {
+		return text
+	}
+	return who + "：「" + text + "」"
+}
+
+// maxQuotedChars 引用文本最多带多少字进上下文。引用通常是半句话的上下文，
+// 但也可能有人引用一大段聊天记录——那对决策没什么用，纯粹烧 token。
+const maxQuotedChars = 120
+
+// extractQuoted 从 msg_elements 里把「被引用的内容」抠出来。
+//
+// 平台把引用/回复包装在消息元素里（可能还套聊天记录，所以递归走），
+// 文本在 Content，图片在 Attachments，**被引用那条消息的作者在 Author**。
+// 作者必须一起取出来：只给文本的话，模型会把被引用的内容当成「刚才有人在群里
+// 说的」，于是回错了人——这在群友甩一段聊天记录出来让你看的时候最容易发生。
+//
+// 拿不到就返回空——引用只是辅助上下文，解析失败不值得让消息本身处理失败。
+func extractQuoted(els []*webhook.MsgElement) (text string, imgs []string, authorOpenID, authorName string) {
+	var texts []string
+	var authors []string
+	// 原始正文非空、清洗后变空 = 那条消息里装的是平台标记（最常见是单个表情）。
+	// 用来区分「被引用的是个表情」和「这个元素里什么都没有」——
+	// 后者如实报空，前者才敢说「一个表情」，不能凭空猜。
+	rawNonEmpty := false
+	var walk func(list []*webhook.MsgElement)
+	walk = func(list []*webhook.MsgElement) {
+		for _, el := range list {
+			if el == nil {
+				continue
+			}
+			// 引用里的正文**也要过 cleanTags**。它和这条消息自己的正文走的是
+			// 同一个平台通道，标记格式完全一样——引用别人一个表情，元素里
+			// 装的就是一整串 <faceType=6,faceId="0",ext="base64..."/>。
+			// 以前只清洗本条消息的正文（OnGroupMessage 里那次），
+			// 引用里的原样透给模型，模型看到的是一坨协议残渣。
+			// 2026-10-02 实况：有人引用别人发的表情问「这条是谁发的？」，
+			// 机器人答「你引用的那条我这儿看不见，截图发出来」——
+			// 它不是看不见，是收到了一坨看不懂的 base64。
+			raw := strings.TrimSpace(el.Content)
+			c, _ := cleanTags(el.Content, nil)
+			if c != "" {
+				texts = append(texts, c)
+			}
+			if raw != "" {
+				rawNonEmpty = true
+			}
+			if el.Author != nil {
+				oid := el.Author.MemberOpenID
+				if oid == "" {
+					oid = el.Author.UserOpenID
+				}
+				if oid == "" {
+					oid = el.Author.ID
+				}
+				nm := displayName(el.Author.Username, oid)
+				// 只记第一个有名字的作者：多数引用只带一条，套聊天记录时后续作者多半是同一个人
+				if oid != "" && authorOpenID == "" {
+					authorOpenID, authorName = oid, nm
+				}
+				if nm != "" {
+					authors = append(authors, nm)
+				}
+			}
+			imgs = append(imgs, imageURLs(el.Attachments)...)
+			walk(el.MsgElements)
+		}
+	}
+	walk(els)
+	if len(imgs) > 4 {
+		imgs = imgs[:4]
+	}
+	if len(authors) > 1 {
+		// 多个不同作者时把名字都带上，模型才知道这是一段对话的摘录
+		authorName = strings.Join(dedupeStrings(authors), "、")
+	}
+	text = strings.Join(texts, "；")
+	// 被引用的那条**可能一个字的正文都没有**——群里甩一张图过来问「这谁？」
+	// 就是这种。这里必须给个非空占位，不能返回空串：
+	// 调用方拿「文本为空」当「这条消息没有引用」，于是原作者是谁、
+	// 「引用」这个动作本身，整段一起丢掉。模型只看到一张来路不明的图，
+	// 2026-10-02 实况：它对着别人半小时前发的图说「你自己发的你问我？」。
+	// 有元素才谈得上「引用」。els 为空是**根本没有引用**，
+	// 这时给占位等于凭空造一段引用，测试和平时的普通消息都会中招。
+	if len(els) > 0 && text == "" {
+		switch {
+		case len(imgs) > 0:
+			text = "（一张图）"
+		case authorOpenID != "":
+			text = "（一条没有文字的消息）"
+		case rawNonEmpty:
+			// 原始正文非空、cleanTags 之后空了：正文里装的是平台标记，
+			// 而标记没匹配上 faceTagRe（平台改了格式）。
+			// 此时**不编**具体是什么——编成「表情」或「表情包」都是在猜，
+			// 猜错会让模型按错的类型理解上下文。如实说「内容无法解析」，
+			// 配合 quoteNote 里「平台没告诉我这条是谁发的」，它会如实说不确定。
+			text = "（内容无法解析）"
+		}
+	}
+	return text, imgs, authorOpenID, authorName
+}
+
+func dedupeStrings(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// OnC2CMessage 处理单聊消息
+func (a *Agent) OnC2CMessage(ev *webhook.C2CMessage) {
+	if ev == nil || ev.Author == nil {
+		return
+	}
+
+	openID := ev.Author.UserOpenID
+	if openID == "" {
+		openID = ev.Author.ID
+	}
+	if openID == "" {
+		return
+	}
+	content := strings.TrimSpace(ev.Content)
+	if content == "" {
+		return
+	}
+	logx.Info("单聊消息", "from", openID, "text", truncate(content, 60))
+
+	// 单聊不登记锚点：SendC2C 根本不查锚点池（主动通道已下线），
+	// 登记了既没人用，又让 c2c:* 的键在 AnchorPool 里只增不减。
+	a.engine.OnMessage(&brain.Event{
+		GroupID:   c2cPrefix + openID,
+		GroupName: "单聊",
+		MsgID:     ev.ID,
+		OpenID:    openID,
+		Name:      displayName(ev.Author.Username, openID),
+		Content:   content,
+		AtMe:      true, // 单聊里每句话都是在跟它说话
+		TS:        parseTS(ev.Timestamp),
+	})
+}
+
+// OnGroupRobotEvent 处理机器人进出群、群主开关全量消息
+func (a *Agent) OnGroupRobotEvent(eventType string, ev *webhook.GroupRobotEvent) {
+	if ev == nil {
+		return
+	}
+	switch eventType {
+	case webhook.EventGroupMsgRecv:
+		logx.Info("群主已开启全量消息", "group", ev.GroupOpenID)
+	case webhook.EventGroupMsgReject:
+		logx.Info("群主已关闭全量消息，后续只能收到 @ 消息", "group", ev.GroupOpenID)
+	case webhook.EventGroupAddRobot:
+		logx.Info("机器人被加入群", "group", ev.GroupOpenID)
+		a.mem.Group(ev.GroupOpenID, "").SetLeft(false)
+	case webhook.EventGroupDelRobot:
+		logx.Info("机器人被移出群", "group", ev.GroupOpenID)
+		// 平台没有群列表查询接口，这个事件是唯一能拿到的「已退群」信号，
+		// 标记后管理端把它标灰，由人确认后手动移除
+		a.mem.Group(ev.GroupOpenID, "").SetLeft(true)
+	}
+}
+
+// SendGroup 实现 brain.Sender。内部按前缀分流到群消息 / 单聊。
+// 发送成功后立刻把自己的话写回记忆——否则它下一轮会忘了自己说过什么。
+func (a *Agent) SendGroup(ctx context.Context, sessionID, content string) error {
+	return a.SendGroupTo(ctx, sessionID, content, "")
+}
+
+// SendGroupTo 实现 brain.Sender，replyToOpenID 指定这条回复要挂在谁的消息下。
+//
+// 这是「群里看起来在跟谁说话」的唯一决定点。replyToOpenID 为空时退化成
+// 「挂到群里最新那条」，那在多人同时说话时必然有一部分挂错人。
+func (a *Agent) SendGroupTo(ctx context.Context, sessionID, content, replyToOpenID string) error {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil
+	}
+	var err error
+	if strings.HasPrefix(sessionID, c2cPrefix) {
+		err = a.qq.SendC2C(ctx, strings.TrimPrefix(sessionID, c2cPrefix), content)
+	} else {
+		err = a.qq.SendGroupTo(ctx, sessionID, content, replyToOpenID)
+	}
+	if err != nil {
+		return err
+	}
+	a.recordSent(sessionID, content)
+	return nil
+}
+
+// recordSent 发送成功后的公共收尾：去重检查 + 写回自己的记忆
+func (a *Agent) recordSent(sessionID, content string) {
+	cfg := a.store.Get()
+	a.mu.Lock()
+	dup := a.lastText[sessionID] == content
+	a.lastText[sessionID] = content
+	a.mu.Unlock()
+	if dup {
+		logx.Warn("检测到重复发言", "session", sessionID, "text", truncate(content, 40))
+	}
+	a.mem.Group(sessionID, "").Append(memory.Line{
+		TS: time.Now(), Role: memory.RoleBot, Content: content,
+	}, cfg.Brain.MaxHistory)
+}
+
+// normalizeContent 把回调里的各种消息元素拼成一段可读文本。
+// 纯文本之外的东西只留占位：便宜的模型大多不支持视觉输入，
+// 硬塞图片 URL 只会白白烧 token，还可能让它对着链接胡说八道。
+func normalizeContent(ev *webhook.GroupMessage) string {
+	var sb strings.Builder
+	text := strings.TrimSpace(ev.Content)
+	if text != "" {
+		sb.WriteString(text)
+	}
+	for _, at := range ev.Attachments {
+		if at == nil {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(at.ContentType, "image"):
+			appendPart(&sb, "[图片]")
+		case at.ContentType == "voice":
+			// 语音优先用平台给的 ASR 文本，没有就只能标个占位
+			if strings.TrimSpace(at.ASRReferText) != "" {
+				appendPart(&sb, "[语音]"+strings.TrimSpace(at.ASRReferText))
+			} else {
+				appendPart(&sb, "[语音]")
+			}
+		case strings.HasPrefix(at.ContentType, "video"):
+			appendPart(&sb, "[视频]")
+		default:
+			appendPart(&sb, "[文件]")
+		}
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+func appendPart(sb *strings.Builder, s string) {
+	if sb.Len() > 0 {
+		sb.WriteString(" ")
+	}
+	sb.WriteString(s)
+}
+
+// mentions 判断文本里是否叫了它的名字
+func mentions(text, name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	return strings.Contains(text, name)
+}
+
+// parseMentions 解析平台给的 mentions 数组。
+//
+// 返回值：机器人自己是否被 @、以及这条消息 @ 到的其他人（openid → 昵称）。
+//
+// 为什么必须用它而不是解析 content：官方文档只承诺「content 已去除 @机器人 的前缀」，
+// 对 @他人 在正文里残留成什么格式没有任何承诺，写正则去抠 openid 属于赌平台行为。
+// mentions 是唯一结构化的信号。
+//
+// 注意 mentions 里可能出现机器人的 member_openid 或 user_openid（两个字段平台都可能填），
+// 所以两个都要比。
+func parseMentions(ms []*webhook.User, selfOpenID string) (mentionsMe bool, others map[string]string) {
+	others = map[string]string{}
+	selfOpenID = strings.TrimSpace(selfOpenID)
+	for _, u := range ms {
+		if u == nil {
+			continue
+		}
+		oid := u.MemberOpenID
+		if oid == "" {
+			oid = u.UserOpenID
+		}
+		if oid == "" {
+			oid = u.ID
+		}
+		if oid == "" {
+			continue
+		}
+		if selfOpenID != "" && (oid == selfOpenID || u.ID == selfOpenID) {
+			mentionsMe = true
+			continue
+		}
+		others[oid] = u.Username
+	}
+	return mentionsMe, others
+}
+
+func groupNameOf(cfg config.Config, groupID string) string {
+	for _, g := range cfg.Groups {
+		if g.OpenID == groupID && g.Name != "" {
+			return g.Name
+		}
+	}
+	return shortID(groupID)
+}
+
+// groupEnabled 群白名单。配置里没列出的群默认是允许的——
+// 否则每加一个群都要改配置重启，太笨重。
+func groupEnabled(cfg config.Config, groupID string) bool {
+	for _, g := range cfg.Groups {
+		if g.OpenID == groupID {
+			return g.Enabled
+		}
+	}
+	return true
+}
+
+func displayName(username, openID string) string {
+	if strings.TrimSpace(username) != "" {
+		return strings.TrimSpace(username)
+	}
+	return shortID(openID)
+}
+
+func shortID(s string) string {
+	if len(s) <= 8 {
+		return s
+	}
+	return s[len(s)-8:]
+}
+
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
+// parseTS 解析回调时间戳。平台给的是 RFC3339；解析失败就用本地时间，
+// 不能因为一个时间字段把整条消息丢掉。
+func parseTS(s string) time.Time {
+	if s == "" {
+		return time.Now()
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	return time.Now()
+}

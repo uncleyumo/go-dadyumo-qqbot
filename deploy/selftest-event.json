@@ -1,0 +1,15 @@
+{
+  "op": 0,
+  "t": "GROUP_AT_MESSAGE_CREATE",
+  "d": {
+    "id": "selftest-0001",
+    "content": "老爹在吗，说句话听听",
+    "group_openid": "SELFTEST_GROUP_NOT_REAL",
+    "timestamp": "2026-09-29T23:06:00+08:00",
+    "message_type": 0,
+    "author": {
+      "user_openid": "SELFTEST_USER_NOT_REAL"
+    },
+    "mentions": []
+  }
+}

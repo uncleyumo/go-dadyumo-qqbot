@@ -1,0 +1,1641 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>群友控制台</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--line:#262b36;--fg:#e6e8ee;--dim:#8b93a7;--acc:#4f8cff;--ok:#3ecf8e;--bad:#ff6b6b;--warn:#ffb454}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+header{display:flex;align-items:center;gap:16px;padding:14px 22px;border-bottom:1px solid var(--line);background:var(--card);position:sticky;top:0;z-index:9}
+header h1{font-size:16px;margin:0}
+.tabs{display:flex;gap:4px;margin-left:auto}
+.tab{padding:7px 14px;border-radius:8px;cursor:pointer;color:var(--dim);font-size:13px;border:1px solid transparent}
+.tab.on{background:#222836;color:var(--fg);border-color:var(--line)}
+main{padding:22px;max-width:1180px;margin:0 auto}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.stat .k{color:var(--dim);font-size:12px}
+.stat .v{font-size:22px;font-weight:600;margin-top:2px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:18px}
+.panel h2{margin:0 0 14px;font-size:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.panel h2 .hint{font-weight:400;color:var(--dim);font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--line);vertical-align:middle}
+th{color:var(--dim);font-weight:500;font-size:12px;white-space:nowrap}
+tr:last-child td{border-bottom:0}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px}
+input,select,textarea{background:#0d1016;border:1px solid var(--line);border-radius:7px;color:var(--fg);padding:7px 9px;font:inherit;font-size:13px;outline:none;width:100%}
+input:focus,textarea:focus{border-color:var(--acc)}
+textarea{resize:vertical;min-height:60px}
+button{padding:7px 14px;background:var(--acc);border:0;border-radius:7px;color:#fff;font:inherit;font-size:13px;cursor:pointer}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--dim)}
+button.ghost:hover{color:var(--fg)}
+/* 选中态：日志页的分类切换靠它区分当前筛的是哪一类 */
+button.ghost.on{background:#222836;color:var(--fg);border-color:#3a4252}
+button.sm{padding:4px 9px;font-size:12px}
+button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
+.row{display:flex;gap:10px;align-items:center;margin-bottom:10px}
+.row>label{width:150px;color:var(--dim);font-size:13px;flex:none}
+.fld{flex:1;min-width:0}
+.fld .hint{display:block;color:var(--dim);font-size:11px;margin-top:2px;line-height:1.5}
+.fld .hint.warn{color:var(--warn)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:4px 14px}
+.ep{border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px;background:#14171e}
+.ep.off{opacity:.55}
+.mline{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
+.mline input{flex:1;min-width:60px}
+.mline .tag{font-size:11px;color:var(--dim);flex:none}
+.muted{color:var(--dim);font-size:12px}
+/* 撑满视口剩余高度：写死 max-height 会让下面留一大片空白，
+   而日志恰恰是最需要纵向空间的那一屏 */
+.logs{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
+  height:calc(100vh - 230px);min-height:420px;overflow:auto}
+.logs>div{padding:3px 0;border-bottom:1px solid #1d222c;white-space:pre-wrap;word-break:break-all}
+/* kv 逐字段换行：原文和清洗结果上下对照，解析 bug 一眼看出 */
+.logkv{margin:2px 0 4px;padding-left:10px;border-left:2px solid #262d3a}
+/* 分类徽章：让「决策/发言/聊天」在长列表里一眼可分。
+   配色按链路分冷暖——决策用琥珀（要盯的），聊天用蓝（背景噪音），
+   错误用红。全一样的话扫一百条还是要逐字读。 */
+.logcat{display:inline-block;margin:0 6px;padding:0 6px;border-radius:4px;
+  font-size:11px;line-height:16px;background:#232a37;color:var(--dim)}
+.logcat.c-decision{background:#3a2d12;color:#e0b062}
+.logcat.c-speak{background:#12301f;color:#6fce9a}
+.logcat.c-chat{background:#12283a;color:#6fb0e0}
+.logcat.c-model{background:#2a1f3a;color:#b592e0}
+.logcat.c-webhook{background:#333;text}
+.logcat.c-system{background:#2a2a33;color:#9a9aa8}
+.loggrp{display:inline-block;margin:0 6px;color:var(--dim);font-size:11px}
+.loggrp::before{content:'@';opacity:.5}
+.empty{padding:26px 12px;color:var(--dim);text-align:center}
+/* 默认一行一条，字段之间横向排比——竖着排的话一条消息要占六七行，200 条根本扫不动 */
+.kvrow{display:inline-flex;gap:4px;align-items:baseline;margin:0 10px 2px 0;max-width:100%}
+.kvk{color:var(--dim)}
+.kvv{color:#c8d3e6;word-break:break-all}
+/* 只有真长值（原文/引用/正文）才限两行、点击展开 */
+.kvwrap{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
+.kvwrap.open{-webkit-line-clamp:unset;display:block}
+/* 关键字段加重：这几栏决定了「这条消息在跟谁说话」 */
+.kvk.hi{color:#8fa8cc}
+.lv-INFO{color:#9fb4d4}.lv-WARN{color:var(--warn)}.lv-ERROR{color:var(--bad)}.lv-DEBUG{color:#6b7280}
+.hide{display:none}
+#toast{position:fixed;right:20px;bottom:20px;background:var(--ok);color:#062;padding:10px 16px;border-radius:8px;font-size:13px;opacity:0;transition:.2s;pointer-events:none;z-index:99}
+#toast.show{opacity:1}
+#toast.bad{background:var(--bad);color:#fff}
+.switch{display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--dim)}
+.badge{display:inline-block;padding:1px 8px;border-radius:6px;font-size:11px;border:1px solid var(--bad);color:var(--bad);margin-left:6px}
+/* 调度顺序拖拽面板 */
+.sitem{display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:8px;margin-bottom:6px;background:#14171e;cursor:grab}
+.sitem.drag{opacity:.4;border-color:var(--acc)}
+.sitem .grip{color:var(--dim);cursor:grab;user-select:none}
+.sitem .rank{color:var(--acc);font-weight:600;width:22px;flex:none}
+/* 分时段统计图 */
+.chart-tabs{display:flex;gap:6px;margin-left:auto}
+.chart-tabs .ct{padding:4px 10px;border-radius:6px;border:1px solid var(--line);color:var(--dim);font-size:12px;cursor:pointer}
+.chart-tabs .ct.on{color:var(--fg);border-color:var(--acc);background:#1a2233}
+.legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--dim)}
+.legend .li{display:flex;align-items:center;gap:6px}
+.legend .sw{width:10px;height:10px;border-radius:3px;flex:none}
+/* 409 冲突弹层 */
+#ovl{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:98}
+/* 必须写成 #ovl.hide：ID 选择器特异性(1,0,0)高于 .hide(0,1,0)，
+   只靠 classList.add('hide') 是关不掉这个弹层的（曾导致弹层全屏常驻、整个控制台点不动）*/
+#ovl.hide{display:none}
+#ovl .box{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:22px;max-width:520px;width:92%}
+#ovl .box h3{margin:0 0 10px;font-size:15px}
+#ovl .box p{color:var(--dim);font-size:13px;margin:0 0 18px}
+#ovl .box .btns{display:flex;gap:10px;justify-content:flex-end}
+/* 人设与策略：多行文本域给足高度，内容不再被框内滚动条藏起来 */
+.ta-lg{min-height:200px}          /* 背景 / 说话风格：一屏能看完 */
+.ta-md{min-height:130px}          /* 自由长文本 */
+.ta-list{min-height:150px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.9}
+/* 「每行一条」的视觉提示：等宽字体 + 行距放大，一眼能看出是列表不是段落 */
+.hint-tag{display:inline-block;margin-right:6px;padding:0 6px;border:1px solid var(--line);border-radius:5px;color:var(--dim);font-size:10px;line-height:16px}
+/* 保存条：人设页有三千多像素高，按钮贴在页尾意味着改完上面的人设要滚到底才保存。
+   改成跟随视口的底栏，改到哪儿都能点。
+   底色必须是不透明的：渐变会让下面的 textarea 内容透上来，按钮压在字上。
+   上方投影用来跟正文分界，不然分不清按钮是浮在内容上还是另起一行。 */
+.savebar{position:sticky;bottom:0;z-index:8;margin-top:24px;padding:12px 0 4px;
+  background:var(--bg);box-shadow:0 -10px 12px -8px rgba(0,0,0,.6)}
+/* 人设页：卡片之间拉开一点，标题与说明的层级更清楚。
+   只作用于 #p-persona——概览页的 h2 里塞着「刷新」按钮和图表页签，
+   让说明文字独占一行会把它们挤到别处去。
+   表情包页沿用同一套排版。 */
+#p-persona .panel+.panel,#p-memes .panel+.panel{margin-top:24px}
+#p-persona .panel h2,#p-memes .panel h2{font-size:15px;margin-bottom:18px}
+#p-persona .panel h2 .hint,#p-memes .panel h2 .hint{display:block;flex-basis:100%;margin-top:2px;line-height:1.7}
+
+/* ================= 窄屏适配（手机） =================
+   单文件无框架，全部靠媒体查询兜住；不引入任何外部资源，离线可用。 */
+@media (max-width:768px){
+  body{font-size:15px}
+  header{flex-wrap:wrap;gap:8px;padding:10px 12px}
+  header h1{font-size:15px}
+  /* 「已运行 9h43m59s + 退出」单独占一行，永远不会被导航挤掉 */
+  #uptime{order:3;flex-basis:100%;font-size:11px}
+  #logout{order:2;margin-left:auto}
+  /* 导航横向滚动，不折行也不挤爆 */
+  .tabs{order:4;margin-left:0;flex-basis:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .tabs::-webkit-scrollbar{display:none}
+  .tab{flex:none;padding:9px 13px;white-space:nowrap}
+  main{padding:12px}
+  .panel{padding:12px}
+  /* 手机上顶栏折行占更多高度，日志区少留点；再矮就交给 min-height 兜底 */
+  .logs{height:calc(100vh - 300px);min-height:300px}
+  .panel h2{gap:6px}
+  .panel h2 button{margin-left:0!important}
+  .stats{grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}
+  .stat .v{font-size:19px}
+  /* 「标签 + 控件」两列布局一律改单列，控件占满宽度 */
+  .grid2{grid-template-columns:1fr}
+  .row{flex-wrap:wrap;gap:6px}
+  .row>label{width:auto;min-width:100%;font-size:12px}
+  .row>.fld,.row>input,.row>select,.row>textarea{max-width:none!important;width:100%;flex:1 0 100%}
+  .fld .hint{font-size:12px;margin-top:4px}
+  /* 表格横向滚动，不把页面撑破 */
+  table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%;white-space:nowrap}
+  th,td{padding:8px}
+  /* 接入点的模型行：标签和输入框各自换行 */
+  .mline{gap:6px}
+  .mline input{max-width:none!important;flex:1 1 130px;min-width:0}
+  .sitem{flex-wrap:wrap}
+  /* 触摸目标不小于 40px；输入框 16px 顺带避免 iOS 聚焦时自动放大整页 */
+  input,select,textarea,button{font-size:16px;min-height:40px}
+  button{padding:9px 14px}
+  button.sm{padding:7px 11px}
+  input[type=checkbox]{width:auto!important;min-height:0}
+  .switch{font-size:14px}
+  /* 手机上文本域反而更高，更易读 */
+  .ta-lg{min-height:240px}
+  .ta-md{min-height:170px}
+  .ta-list{min-height:190px}
+  #ovl .box{padding:18px}
+  #ovl .box .btns{flex-direction:column-reverse}
+  #ovl .box .btns button{width:100%}
+  #toast{left:12px;right:12px;text-align:center}
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>群友控制台</h1>
+  <span class="muted" id="uptime"></span>
+  <div class="tabs">
+    <div class="tab on" data-p="overview">概览</div>
+    <div class="tab" data-p="endpoints">接入点与模型</div>
+    <div class="tab" data-p="persona">人设与策略</div>
+    <div class="tab" data-p="memes">表情包</div>
+    <div class="tab" data-p="groups">群与主人</div>
+    <div class="tab" data-p="logs">日志</div>
+  </div>
+  <button class="ghost sm" id="logout">退出</button>
+</header>
+
+<main>
+  <!-- ============ 概览 ============ -->
+  <section id="p-overview">
+    <div class="stats" id="stats"></div>
+    <div class="panel" id="budget-bar"></div>
+    <div class="panel hide" id="revhint" style="border-color:#c2410c;color:#c2410c">
+      服务端配置已在别处变更，当前表单可能不是最新。确认要拉最新就点「刷新」，
+      否则继续编辑并保存会<b>用旧值覆盖服务端</b>。
+      <button class="ghost sm" onclick="loadState(true)">刷新</button>
+    </div>
+
+    <div class="panel">
+      <h2>实际调度顺序 <span class="hint">这不是「健康分排名」，而是<b>下一次聊天真正会被尝试的顺序</b>：按 priority 硬分层 → 同档内没被验证过的优先 → 再比健康分；冷却中/已下线的会被跳过</span>
+      </h2>
+      <div id="chain"></div>
+    </div>
+
+    <div class="panel">
+      <h2>分时段调用统计 <span class="hint">每个时段哪个模型被用了多少次（含失败与 token），数据存 SQLite，重启/改配置不丢；明细精确到秒，保留 90 天</span>
+        <span class="chart-tabs">
+          <span class="ct" data-r="60m">近 60 分钟</span>
+          <span class="ct on" data-r="today">今日逐小时</span>
+          <span class="ct" data-r="7d">近 7 天</span>
+        </span>
+      </h2>
+      <div id="usage-chart"></div>
+      <div class="legend" id="usage-legend"></div>
+      <div class="muted" id="usage-meta" style="margin-top:8px"></div>
+    </div>
+
+    <div class="panel">
+      <h2>最近调用明细 <span class="hint">最新在前。排查「这次为什么走了兜底模型」时看这里</span>
+        <button class="ghost sm" style="margin-left:auto" onclick="loadRecent()">刷新</button>
+      </h2>
+      <table id="recent">
+        <thead><tr>
+          <th>时间</th><th>接入点</th><th>模型</th><th>结果</th><th>首字(ms)</th><th>延迟(ms)</th><th>token(入/出)</th><th>错误</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h2>调用目标健康度 <span class="hint">按健康分降序展示各目标的「底子」（延迟/成功率/冷却）。<b>注意：这不是命中顺序</b>，实际顺序看上方「实际调度顺序」。「命中序」列标出它在上面的链路里排第几，— 表示本轮轮不到</span>
+        <button class="ghost sm" style="margin-left:auto" onclick="loadState(true)">刷新</button>
+      </h2>
+      <table id="targets">
+        <thead><tr>
+          <th>状态</th><th>命中序</th><th>优先级</th><th>接入点</th><th>模型</th><th>得分</th>
+          <th>首字(ms)</th><th>延迟(ms)</th><th>成功率</th><th>调用/失败</th><th>最近错误</th><th>操作</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h2>连通性测试 <span class="hint">直接对某个（接入点 × 模型）发一句话，验证配置是否可用</span></h2>
+      <div class="row">
+        <select id="t-ep" style="max-width:220px"></select>
+        <select id="t-model" style="max-width:280px"></select>
+        <input id="t-prompt" value="用一句话打个招呼" style="max-width:320px">
+        <button onclick="runTest()">发送测试</button>
+      </div>
+      <pre class="muted" id="t-out" style="white-space:pre-wrap;margin:0"></pre>
+    </div>
+  </section>
+
+  <!-- ============ 接入点与模型 ============ -->
+  <section id="p-endpoints" class="hide">
+    <div class="panel">
+      <h2>调度顺序 <span class="hint">上面 = 最优先。优先级是<b>硬分层</b>：高优先级模型还活着就轮不到下面的；它报错进冷却才自动落下一档。拖完记得点「保存并生效」</span></h2>
+      <div id="order"></div>
+    </div>
+    <div class="panel">
+      <h2>接入点 <span class="hint">一个 Key + 多个 OpenAI 格式模型 = 一个接入点</span>
+        <button class="sm" style="margin-left:auto" onclick="addEndpoint()">新增接入点</button>
+        <button class="ghost sm" onclick="reloadConfig()">放弃修改</button>
+        <button class="sm" onclick="saveCfg()">保存并生效</button>
+      </h2>
+      <div id="eps"></div>
+    </div>
+  </section>
+
+  <!-- ============ 人设与策略 ============ -->
+  <section id="p-persona" class="hide">
+    <div class="panel">
+      <h2>人设本体 <span class="hint">它是谁。这部分会逐字进 system prompt，写多少烧多少 token</span></h2>
+      <div class="row"><label>名字</label><div class="fld"><input id="pf-name">
+        <small class="hint">它在群里的名字，也是群友 @ 它、叫它时触发回应的关键词。</small></div></div>
+      <div class="row"><label>背景</label><div class="fld"><textarea id="pf-bg" class="ta-lg"></textarea>
+        <small class="hint">它是什么人、什么来头。建议 ≤200 字，写太长每轮对话都在烧钱。</small></div></div>
+      <div class="row"><label>说话风格</label><div class="fld"><textarea id="pf-style" class="ta-lg"></textarea>
+        <small class="hint">口气什么样。举例比形容词管用：「爱用短句，偶尔阴阳怪气，从不写小作文」。</small></div></div>
+      <div class="row"><label>口头禅</label><div class="fld"><textarea id="pf-catch" class="ta-list"></textarea>
+        <small class="hint"><span class="hint-tag">每行一条</span>建议 ≤5 条。太多了句句都像背台词，反而假。</small></div></div>
+      <div class="row"><label>嘴臭边界</label><div class="fld"><textarea id="pf-roast" class="ta-list"></textarea>
+        <small class="hint"><span class="hint-tag">每行一条</span>损人允许损到什么程度：可以损什么、不能碰什么，写清两件事。</small></div></div>
+    </div>
+
+    <div class="panel">
+      <h2>行为边界 <span class="hint">什么情况不接话、什么忙不帮、什么绝不碰</span></h2>
+      <div class="row"><label>红线</label><div class="fld"><textarea id="pf-red" class="ta-list"></textarea>
+        <small class="hint"><span class="hint-tag">每行一条</span>绝对不能做的事。一条总管原则优于一堆细则——规则互相打架时模型会懵，行为反而失控。</small></div></div>
+      <div class="row"><label>何时闭嘴</label><div class="fld"><textarea id="pf-silence" class="ta-list"></textarea>
+        <small class="hint"><span class="hint-tag">每行一条</span>什么情况不接话。「能闭嘴」是它像真人的第一条底线，建议至少保留一两条。</small></div></div>
+      <div class="row"><label>何时不伺候</label><div class="fld"><textarea id="pf-refuse" class="ta-list"></textarea>
+        <small class="hint warn"><span class="hint-tag">每行一条</span>⚠️ 别写一刀切拒答。「凡是求助都拒绝」会误伤真心求教的人；只写被当工具反复使唤、被恶意测试时的分寸。</small></div></div>
+      <div class="row"><label>对开发者的态度</label><div class="fld"><textarea id="pf-loyalty" class="ta-md"></textarea>
+        <small class="hint">面对主人（开发者）时的特殊态度。</small></div></div>
+      <div class="row"><label>单条最大字数</label><div class="fld"><input id="pf-max" type="number">
+        <small class="hint">建议 80~150。超过会显得在写小作文，不像真人说话。</small></div></div>
+    </div>
+
+    <div class="panel">
+      <h2>决策与预算 <span class="hint">决定它「说不说话、花多少钱」的旋钮</span></h2>
+      <div class="grid2">
+        <div class="row"><label>每日调用预算</label><div class="fld"><input id="bf-budget" type="number">
+          <small class="hint">每天最多发起多少次 LLM 调用（硬闸门），0=不限。建议 300~500。</small></div></div>
+        <div class="row"><label>冲动阈值</label><div class="fld"><input id="bf-imp" type="number" step="0.05">
+          <small class="hint">开口门槛 0~1，越高越安静。建议 0.5~0.7。</small></div></div>
+        <div class="row"><label>攒批静默（秒）</label><div class="fld"><input id="bf-deb" type="number">
+          <small class="hint">收到消息先等这么久再决定说不说话，能把一串消息合并成一轮处理——省钱第一旋钮。建议 20~45。</small></div></div>
+        <div class="row"><label>攒批抖动（秒）</label><div class="fld"><input id="bf-debj" type="number">
+          <small class="hint">攒批时间上叠加的随机抖动，防机械感。建议 5~15。</small></div></div>
+        <div class="row"><label>最小发言间隔（秒）</label><div class="fld"><input id="bf-minsp" type="number">
+          <small class="hint">两次发言的最小间隔。建议 30~60。</small></div></div>
+        <div class="row"><label>上下文预算(token)</label><div class="fld"><input id="bf-ctx" type="number">
+          <small class="hint">历史消息最多带多少 token（只管历史，人设提示词另算约 2.5K）。建议 3200；模型窗口至少 12K 才不撞。</small></div></div>
+        <div class="row"><label>短期记忆条数</label><div class="fld"><input id="bf-hist" type="number">
+          <small class="hint">每群保留多少条近期对话。建议 30~50；长期运行靠滚动摘要，别靠无限加条数。</small></div></div>
+        <div class="row"><label>温度</label><div class="fld"><input id="bf-temp" type="number" step="0.05">
+          <small class="hint">越高越野、越低越稳。建议 0.7~0.9。</small></div></div>
+        <div class="row"><label>最大输出 token</label><div class="fld"><input id="bf-out" type="number">
+          <small class="hint">单次回复最大输出。带思维链的模型会先吃掉一部分，给太小可能回复空内容，建议 1024~2048。</small></div></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>发言节奏 <span class="hint">把一段话拆成几条、按真人速度逐条发</span></h2>
+      <div class="grid2">
+        <div class="row"><label>最多几条</label><div class="fld"><input id="sf-maxseg" type="number">
+          <small class="hint">一段话最多拆几条。真人是连着几句一起发的，别为了显得克制就限制成 1~2 条——那反而像机器人。配上下面的「尾部加速」，5 条也不会变成一条一条慢慢爬。</small></div></div>
+        <div class="row"><label>单条字数上限</label><div class="fld"><input id="sf-maxchar" type="number">
+          <small class="hint">建议 36~60。</small></div></div>
+        <div class="row"><label>条间最小(ms)</label><div class="fld"><input id="sf-min" type="number">
+          <small class="hint">两条消息之间的最短间隔，模拟打字犹豫。建议 800~1500。</small></div></div>
+        <div class="row"><label>条间最大(ms)</label><div class="fld"><input id="sf-max" type="number">
+          <small class="hint">建议 2000~3000。</small></div></div>
+        <div class="row"><label>每字追加(ms)</label><div class="fld"><input id="sf-per" type="number">
+          <small class="hint">消息每多一个字多等这么久——这是「像在打字」最明显的信号。建议 120~200。</small></div></div>
+        <div class="row"><label>被点名时提速</label><div class="fld"><input id="sf-eager" type="number" step="0.05">
+          <small class="hint">被 @、被叫名字、主人说话时按这个系数整体提速（0.5 = 快一半）。这些场景下群友在等，慢几秒就以为掉线了。</small></div></div>
+        <div class="row"><label>尾部加速</label><div class="fld"><input id="sf-ramp" type="number" step="0.02">
+          <small class="hint">多条连发时后面几条按 (1 − 该值×序号) 缩短间隔。真人发消息是越说越急的，固定间隔才是机器人感。建议 0.15~0.25，0 = 不加速。</small></div></div>
+        <div class="row"><label>开口前思考(ms)</label><div class="fld"><input id="sf-first" type="number">
+          <small class="hint">发第一条前的停顿。这个值在本项目里影响很小——攒批窗口 8 秒加模型调用（实测均延迟 4.4 秒）决定了首字最快也在 12 秒后，它淹没在里面。想调就调，不会更拟真。</small></div></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>在线时段 <span class="hint">控制它每天几点愿意掺和闲聊，@ 永远不受影响</span></h2>
+      <div class="grid2">
+        <div class="row"><label>启用在线时段</label><div class="fld"><input id="sch-on" type="checkbox" style="width:auto">
+          <small class="hint">关掉 = 全天候同频在线。</small></div></div>
+        <div class="row"><label>档位</label><div class="fld"><select id="sch-mode">
+          <option value="daytime">白天为主（默认·白天几乎全在线）</option>
+          <option value="deepseek_offpeak">DeepSeek 错峰半价（省钱，白天只有 20%）</option>
+          <option value="night_owl">夜猫子</option>
+          <option value="always">全天在线</option>
+          <option value="random_daily">每天随机（今天挑一段高活跃）</option>
+          <option value="custom">自定义（用下面的窗口表）</option>
+        </select>
+          <small class="hint">默认「白天为主」：错峰半价时段（00:30-08:30）群里没人，白天压活跃度只会让它不理人。</small></div></div>
+        <div class="row"><label>@ 后实时宽限(秒)</label><div class="fld"><input id="sch-grace" type="number">
+          <small class="hint">被 @ 之后这么长的时间内保持实时回应，不走概率。建议 300。</small></div></div>
+        <div class="row"><label>平时在线率(0~1)</label><div class="fld"><input id="sch-base" type="number" step="0.05" min="0" max="1">
+          <small class="hint">没命中任何时段时的活跃度。嫌它太安静往上拧，嫌话多往下拧。建议 0.2~0.5。</small></div></div>
+      </div>
+      <div class="muted" id="sch-now">当前：—</div>
+      <div style="margin-top:8px">
+        <div class="muted">自定义窗口（仅档位选「自定义」时生效，支持跨午夜如 18:00→02:00）</div>
+        <table id="sch-windows"><tbody></tbody></table>
+        <button class="ghost sm" onclick="addScheduleWindow()">+ 加一个时段</button>
+      </div>
+      <div class="muted" style="margin-top:8px">
+        在线率是概率不是开关：80% 意味着十句闲聊大约接八句，不会「一到点就失联」。
+        被 @ / 私聊一律放行，且 @ 之后的宽限期内保持实时回应。
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>QQ 通道</h2>
+      <div class="grid2">
+        <div class="row"><label>沙箱环境</label><div class="fld"><input id="qf-sandbox" type="checkbox" style="width:auto">
+          <small class="hint">仅开发调试时开；上线必须关，否则收不到正式环境消息。</small></div></div>
+        <div class="row"><label>优先被动消息</label><div class="fld"><input id="qf-passive" type="checkbox" style="width:auto">
+          <small class="hint">保持开启：被动回复不占额度、永远可用。</small></div></div>
+        <div class="row"><label>强制验签</label><div class="fld"><input id="qf-sign" type="checkbox" style="width:auto">
+          <small class="hint">保持开启：验证回调确实来自腾讯，防伪造请求。</small></div></div>
+      </div>
+      <div class="muted">
+        AppID / AppSecret 出于安全考虑只能在 config.json 中修改。<br>
+        主动消息通道已移除：腾讯 2025-04 起不再支持 QQ 机器人主动推送，所有发言都走被动回复（挂 msg_id）。
+      </div>
+    </div>
+    <div class="savebar"><button onclick="saveCfg()">保存并生效</button></div>
+  </section>
+
+  <!-- ============ 表情包 ============ -->
+  <!-- 单独一页而不是塞进人设页的第 6 张卡片：池子要看、要删、要排序，
+       混在一堆策略表单里会被彻底埋掉（真被埋掉过一次）。 -->
+  <section id="p-memes" class="hide">
+    <div class="panel">
+      <h2>当前池内容 <span class="hint">按此刻好感度排序 —— 这就是模型会看到的顺序</span></h2>
+      <div id="mp-list" class="muted" style="margin-top:6px">加载中…</div>
+      <div style="margin-top:10px">
+        <button class="ghost sm" onclick="loadMemes()">刷新</button>
+        <span class="hint">只能删不能改：描述是优选任务写的，人改了下轮就被覆盖回去。
+          新图是机器人自己看着群里的图收进来的，攒够就满，满了挤掉最不喜欢的。</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>参数 <span class="hint">工具轮只查池子、绝不发送消息</span></h2>
+      <div class="grid2">
+        <div class="row"><label>启用</label><div class="fld"><input id="mp-on" type="checkbox" style="width:auto">
+          <small class="hint">还需要 config.json 里配好 MinIO（endpoint / bucket / 密钥 / 公网地址），缺一项就只走纯文本。</small></div></div>
+        <div class="row"><label>池子上限</label><div class="fld"><input id="mp-maxpool" type="number">
+          <small class="hint">每次工具调用会把整个池子返回给模型、直接烧 token，所以这不是「能存多少」而是「一次能扫完并选准」的上限。建议 20，上限 20。</small></div></div>
+        <div class="row"><label>单图最长驻留(天)</label><div class="fld"><input id="mp-residency" type="number">
+          <small class="hint">到期无条件淘汰，没有任何一张图是永久的。建议 30。</small></div></div>
+        <div class="row"><label>优选间隔(小时)</label><div class="fld"><input id="mp-optint" type="number">
+          <small class="hint">每隔这么久用最便宜的模型给池子里的图重新打分，清掉垃圾。建议 6。</small></div></div>
+        <div class="row"><label>工具轮数上限</label><div class="fld"><input id="mp-rounds" type="number">
+          <small class="hint">不是「正常要走几轮」——正常一轮工具调用就够，这一轮不再有工具调用块就是交付轮。这个值只用来兜住发癫的模型。</small></div></div>
+        <div class="row"><label>单条回复最多几张图</label><div class="fld"><input id="mp-maximg" type="number">
+          <small class="hint">受制于 QQ：同一条用户消息最多回 5 次，文字和图共用这个额度。建议 1。</small></div></div>
+      </div>
+      <div class="muted">
+        所有发送都发生在交付轮，工具轮一次都不发 —— 所以最终轮失败重试不会把同一张图甩两遍。<br>
+        MinIO 连接参数（含密钥）只能在 config.json 中修改。
+      </div>
+    </div>
+    <div class="savebar"><button onclick="saveCfg()">保存并生效</button></div>
+  </section>
+
+  <!-- ============ 群与主人 ============ -->
+  <section id="p-groups" class="hide">
+    <div class="panel">
+      <h2>主人绑定 <span class="hint">群里回调只给 openid，认人只能靠这张表</span></h2>
+      <div class="row"><label>昵称</label><div class="fld"><input id="mf-nick" style="max-width:220px"></div></div>
+      <div class="row"><label>QQ（仅备注）</label><div class="fld"><input id="mf-qq" style="max-width:220px"></div></div>
+      <div class="row"><label>认主口令</label><div class="fld"><input id="mf-token" style="max-width:320px">
+        <small class="hint">在群里发「#认主 口令」即可自动绑定，绑定成功后建议关掉下面的开关。</small></div></div>
+      <div class="row"><label>允许口令绑定</label><div class="fld"><input id="mf-bindon" type="checkbox" style="width:auto"></div></div>
+      <div style="margin-top:10px" class="muted">已绑定 <span id="mf-count">0</span> 个 openid：</div>
+      <div id="mf-list" class="muted" style="margin-top:6px;word-break:break-all"></div>
+      <button class="sm" style="margin-top:12px" onclick="saveCfg()">保存</button>
+    </div>
+
+    <div class="panel">
+      <h2>群状态 <span class="hint">平台不暴露群名：代号是 openid 尾 8 位，给每个群填一次「别名」即可永久显示人话。被移出的群会自动标「已退群」</span>
+        <button class="ghost sm" style="margin-left:auto" onclick="loadState(true)">刷新</button>
+      </h2>
+      <div id="groups"></div>
+    </div>
+  </section>
+
+  <!-- ============ 日志 ============ -->
+  <section id="p-logs" class="hide">
+    <div class="panel">
+      <h2>决策日志 <span class="hint" id="logs-total">—</span>
+        <button class="ghost sm" style="margin-left:auto" id="logs-refresh">刷新</button>
+      </h2>
+      <p class="hint" style="margin:0 0 10px">
+        「它为什么不回」看这一页。每一行都是一次决策：卡在哪道闸、差多少、当时摇到了什么。
+        默认只看<b>决策</b>链路——那才是排查时要找的东西，其余的分类一键可切。
+      </p>
+      <!-- 分类切换。默认落在 decision，因为 90% 的时间是在查「为什么没回」 -->
+      <div class="row" style="margin-bottom:8px">
+        <div class="fld" id="logs-cats" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+      </div>
+      <div class="row" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <div><label>时间范围</label><div class="fld"><select id="logs-range">
+          <option value="60m">最近 1 小时</option>
+          <option value="today">今天</option>
+          <option value="7d" selected>最近 7 天</option>
+          <option value="30d">最近 30 天</option>
+          <option value="">全部</option>
+        </select></div></div>
+        <div><label>级别</label><div class="fld"><select id="logs-level">
+          <option value="">全部</option>
+          <option value="WARN">WARN 及以上</option>
+          <option value="ERROR">仅 ERROR</option>
+        </select></div></div>
+        <div style="flex:1;min-width:200px"><label>关键字</label><div class="fld">
+          <input id="logs-q" type="search" placeholder="搜消息内容或参数，例如「冲动值」「预算」">
+        </div></div>
+      </div>
+      <div class="logs" id="logs"></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<!-- 409 冲突弹层 -->
+<div id="ovl" class="hide">
+  <div class="box">
+    <h3>配置已在别处被修改</h3>
+    <p id="ovl-msg">你当前页面上的编辑是基于旧版本配置的，直接保存会覆盖别处刚做的修改。</p>
+    <div class="btns">
+      <button class="ghost" onclick="ovlCancel()">继续编辑（先不保存）</button>
+      <button class="danger" style="background:transparent" onclick="ovlDiscard()">丢弃本地修改并刷新</button>
+      <button onclick="ovlForce()">强制覆盖服务端</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const PREFIX = location.pathname.replace(/\/$/, '');
+let CFG = null, TARGETS = [], CHAIN = { chain: [] };
+/* ================= 基础设施 ================= */
+
+function toast(msg, bad) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = 'show' + (bad ? ' bad' : '');
+  setTimeout(() => t.className = '', 2200);
+}
+async function api(path, body) {
+  const opt = body ? {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)} : {};
+  const r = await fetch(PREFIX + path, opt);
+  if (r.status === 401) { location.href = PREFIX + '/login.html'; return null; }
+  const j = await r.json().catch(() => null);
+  if (j) j._status = r.status;
+  return j;
+}
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+// escJ：把值塞进 HTML 属性里的 JS 字符串（onclick="fn('…')"）时用。
+// 先做 HTML 转义，再转义 JS 的单引号与反斜杠——长期记忆的 key 是模型生成的自由文本，
+// 里面很可能出现引号，直接 esc() 会把事件属性拆坏。
+const escJ = s => esc(String(s ?? '')).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/[\r\n]+/g, ' ');
+
+/* ================= 轮询与编辑保护 =================
+   表单重绘的唯一依据：配置版本号 rev。
+   只要 rev 没变配置就不可能变，表单一律不动——
+   这是「页面每 5 秒被重置一次、没法编辑」的根治办法。 */
+let LAST_REV = -1;      // 版本基线：只由服务端下发的 rev 更新，绝不用它表达别的意思
+let FORCE_REDRAW = false; // 「我刚改了点东西，下次轮询请重画表单」——与版本基线无关
+let UNSAVED = false;   // 表单有未保存修改
+let DRAGGING = false;  // 正在拖拽调度顺序
+
+async function loadState(force) {
+  const s = await api('/api/state');
+  if (!s || !s.ok) return;
+  const revChanged = (s.rev !== LAST_REV);
+  // accept 同时决定「是否接受服务端配置快照」和「是否重绘表单」，两者必须严格同进同退。
+  // 曾经 CFG = s.config 写在判断之外：编辑期间轮询照样把内存 CFG 换成服务端版本，
+  // 而 DOM 因 editingBusy() 不重绘 → 出现「DOM 2 行、CFG 只有 1 条」的脱节；
+  // syncFromForm 按下标回写时越界的行被 `if(!m)return` 丢掉，
+  // 结果就是「添加模型/新增接入点看着成功、保存后消失」。
+  // FORCE_REDRAW 与 revChanged 分开：前者是「我想重画」，后者是「服务端版本前进了」。
+  // 混用（早期用 LAST_REV = -1 当重画标志）会让保存时发出 rev=-1，
+  // 服务端 clientRev >= 0 不成立 → 乐观锁被静默跳过，反而更危险。
+  const accept = force || ((revChanged || FORCE_REDRAW) && !editingBusy());
+  if (accept) {
+    CFG = s.config;
+    FORCE_REDRAW = false;
+    LAST_REV = s.rev;
+  }
+  TARGETS = s.targets || []; // 目标健康度与配置无关，照常实时更新
+  CHAIN = s.chain || { chain: [] };
+  document.getElementById('uptime').textContent = '已运行 ' + s.uptime;
+  renderStats(s);
+  renderTargets();
+
+  if (accept) {
+    renderEndpoints();
+    renderOrder();
+    renderPersona();
+    loadMemes();
+    renderQQ();
+    renderSchedule(s);
+    renderMaster(s);
+    renderGroups(s);
+    document.getElementById('revhint').classList.add('hide');
+  } else if (revChanged) {
+    // 配置变了但用户正在编辑：不能重写表单，只能明确警告，
+    // 否则他保存时会用旧值把服务端的新配置覆盖回去
+    document.getElementById('revhint').classList.remove('hide');
+  }
+}
+
+// ===== 日志页 =====
+//
+// 这一页**不搭 /api/state 的轮询**：那个接口每次返回掩码后的完整 config +
+// targets + chain + groups + usage + schedule，日志只是其中一个小字段。
+// 为了 200 行日志拖着整套重数据每 5 秒拉一次不合理，而且日志恰恰是
+// 唯一需要自己节奏的东西（切筛选时不该等下一次全量刷新）。
+//
+// 数据来自落盘的 events 表（见 statsdb），所以重启后历史还在，
+// 能翻到几天前「它为什么不理我」。
+
+const LOG_CATS = [
+  ['decision', '决策'], ['speak', '发言'], ['chat', '聊天'],
+  ['model', '模型'], ['webhook', '回调'], ['system', '系统'], ['runtime', '其他'],
+];
+
+// resetScroll：换了筛选条件就跳回顶部（新条件下看的是另一批日志，
+// 保留旧滚动位置等于停在一片空白上）。轮询刷新时为 false。
+let LOG_STATE = { cat: 'decision', timer: null, inFlight: false, resetScroll: false };
+
+function logCatBox() {
+  const box = document.getElementById('logs-cats');
+  if (!box) return;
+  box.innerHTML = LOG_CATS.map(([id, name]) =>
+    `<button class="ghost sm${LOG_STATE.cat === id ? ' on' : ''}" data-cat="${id}">${name}</button>`
+  ).join('') +
+  `<button class="ghost sm${LOG_STATE.cat === '' ? ' on' : ''}" data-cat="">全部</button>`;
+  box.querySelectorAll('[data-cat]').forEach(b => {
+    b.onclick = () => {
+      LOG_STATE.cat = b.dataset.cat;
+      LOG_STATE.resetScroll = true; // 换了一批日志，回顶部
+      logCatBox();
+      loadLogs();
+    };
+  });
+}
+
+async function loadLogs() {
+  if (LOG_STATE.inFlight) return; // 防抖：慢请求叠在一起会把服务端打爆
+  const box = document.getElementById('logs');
+  if (!box) return;
+  LOG_STATE.inFlight = true;
+  const qs = new URLSearchParams();
+  qs.set('range', document.getElementById('logs-range').value);
+  qs.set('limit', '300');
+  if (LOG_STATE.cat) qs.set('cat', LOG_STATE.cat);
+  const lv = document.getElementById('logs-level').value;
+  if (lv) qs.set('level', lv);
+  const q = document.getElementById('logs-q').value.trim();
+  if (q) qs.set('q', q);
+  try {
+    const r = await api('/api/logs?' + qs.toString());
+    if (!r || !r.ok) {
+      box.innerHTML = r && r.enabled === false
+        ? '<div class="empty">统计库未启用，日志只在内存里（重启即失忆）。</div>'
+        : '<div class="empty">日志查询失败</div>';
+      return;
+    }
+    document.getElementById('logs-total').textContent =
+      `共 ${r.total} 条` + (r.total > r.rows.length ? `，显示最近 ${r.rows.length} 条` : '');
+    renderLogs(r.rows || [], box);
+  } catch (e) {
+    box.innerHTML = '<div class="empty">日志查询失败：' + esc(String(e)) + '</div>';
+  } finally {
+    LOG_STATE.inFlight = false;
+  }
+}
+
+// 渲染日志行。
+//
+// **滚动位置必须保住。** 这页每 8 秒轮询一次，而日志是新的在上面——
+// 用户是挂在最上面往下读的。第一版每次渲染完都 `scrollTop = scrollHeight`
+// 把人硬拽到最底下（旧版列表是从下往上长的），于是每 8 秒视线就被抢走一次。
+//
+// 现在按老办法量高度差：新内容插在顶部会把下面所有行往下推 Δpx，
+// 那就把 scrollTop 也加上 Δpx，同一行仍然停在原来的屏幕位置。
+// 人本来就在顶部（scrollTop < 8）时保持 0，让他直接看到新日志。
+function renderLogs(rows, box) {
+  if (!rows.length) {
+    box.innerHTML = '<div class="empty">这个条件下没有日志。换个分类或放宽时间范围试试。</div>';
+    return;
+  }
+  const wasAtTop = LOG_STATE.resetScroll || box.scrollTop < 8;
+  const prevTop = box.scrollTop;
+  const prevH = box.scrollHeight;
+  const out = [];
+  for (const r of rows) {
+    const cat = r.cat || 'runtime';
+    const badge = cat === 'runtime' ? '' : `<span class="logcat c-${esc(cat)}">${esc(catLabel(cat))}</span>`;
+    out.push(
+      `<div class="logline">` +
+      `<span class="lv-${esc(r.level)}">[${esc(fmtTS(r.ts))} ${esc(r.level)}]</span>` +
+      badge +
+      (r.group ? `<span class="loggrp">${esc(r.group)}</span>` : '') +
+      ` ${esc(r.msg)}` +
+      (r.kv ? kvPairs(r.kv) : '') +
+      `</div>`);
+  }
+  box.innerHTML = out.join('');
+  // 见函数头：新行插在顶部，补回等量位移，行不跳。
+  // 已经在顶部就别补——补了反而会离 newest 越来越远。
+  box.scrollTop = wasAtTop ? 0 : prevTop + (box.scrollHeight - prevH);
+  LOG_STATE.resetScroll = false;
+}
+
+function catLabel(c) {
+  const hit = LOG_CATS.find(x => x[0] === c);
+  return hit ? hit[1] : c;
+}
+
+// 时间转成本地可读时间。
+//
+// 两种输入都要接：内存日志（/api/state 里的 logEntry.TS）和事件日志
+// （/api/logs 的 EventRow.TS）都是 Go 的 time.Time，序列化出来是 RFC3339
+// 字符串而不是 unix 秒——早先按 unix 秒算，字符串乘 1000 直接变 NaN，
+// 整列时间全成了 NaN-NaN-NaN。
+function fmtTS(v) {
+  const d = typeof v === 'number' ? new Date(v * 1000) : new Date(v);
+  if (isNaN(d.getTime())) return String(v);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function initLogsPage() {
+  const box = document.getElementById('logs');
+  if (!box) return;
+  logCatBox();
+  document.getElementById('logs-refresh').onclick = () => {
+    LOG_STATE.resetScroll = true; // 手动刷新是「从头再看一遍」的意图
+    loadLogs();
+  };
+  document.getElementById('logs-range').onchange = () => {
+    LOG_STATE.resetScroll = true;
+    loadLogs();
+  };
+  document.getElementById('logs-level').onchange = () => {
+    LOG_STATE.resetScroll = true;
+    loadLogs();
+  };
+  let qt = null;
+  document.getElementById('logs-q').oninput = () => {
+    clearTimeout(qt);
+    LOG_STATE.resetScroll = true;
+    qt = setTimeout(loadLogs, 350); // 输入去抖
+  };
+  // 只有开着日志页时才轮询。别的页签在时拉日志纯属浪费。
+  if (LOG_STATE.timer) clearInterval(LOG_STATE.timer);
+  LOG_STATE.timer = setInterval(() => {
+    if (document.getElementById('p-logs').classList.contains('hide')) return;
+    loadLogs();
+  }, 8000);
+  loadLogs();
+}
+
+// 日志的 kv 逐字段排开，不挤成一坨 JSON。
+// 「原文」和清洗后的「text」要能对照着看——排查解析 bug 全靠这个：
+// 只看结果分不清是程序解析错了还是模型认错了。
+// @全体 / @给 这两栏加重显示，因为它们直接决定「这条在跟谁说话」。
+function kvPairs(kv) {
+  const WIDE = { '原文': 1, '引用': 1, 'text': 1, '内容': 1, 'os': 1, '构成': 1, '档位': 1 };
+  const KEY = { 'text': 1, '内容': 1, '@全体': 1, '@给': 1, '原文': 1, 'os': 1 };
+  let rows = '';
+  for (const k in kv) {
+    let v = kv[k];
+    if (typeof v === 'object') v = JSON.stringify(v);
+    v = String(v);
+    // 只有可能很长的值才限两行。短值硬截断反而让「点开也看不了更多」变成噪音
+    const long = WIDE[k] && v.length > 60;
+    rows += `<span class="kvrow"><span class="kvk${KEY[k] ? ' hi' : ''}">${esc(k)}</span>` +
+      `<span class="kvv${long ? ' kvwrap' : ''}"` +
+      (long ? ` onclick="this.classList.toggle('open')" title="点击展开/收起"` : '') +
+      `>${esc(v)}</span></span>`;
+  }
+  return '<div class="logkv">' + rows + '</div>';
+}
+
+// 覆盖面板里所有可编辑控件（含 checkbox 与 select）。
+// 群别名（.alias-input）与长期记忆（.fact-input）例外：它们是 change 即存的轻量写，
+// 不参与 rev 保护，否则用户一输入就会被判定为「有未保存修改」，5 秒轮询整体失效。
+const EDIT_SELECTOR = '#p-endpoints input,#p-endpoints textarea,#p-endpoints select,' +
+  '#p-persona input,#p-persona textarea,#p-persona select,' +
+  '#p-memes input,#p-memes textarea,#p-memes select,' +
+  '#p-groups input:not(.alias-input):not(.fact-input),#p-groups textarea,#p-groups select,' +
+  '#p-overview input,#p-overview select';
+function editingBusy() {
+  if (UNSAVED || DRAGGING) return true;
+  if (!document.getElementById('ovl').classList.contains('hide')) return true; // 409 弹层打开中
+  const el = document.activeElement;
+  // 正在往长期记忆输入框里打字时不要重绘，否则轮询会把刚敲的字冲掉
+  if (el && el.matches && el.matches('.fact-input')) return true;
+  if (el && el.matches && el.matches(EDIT_SELECTOR)) return true;
+  const els = document.querySelectorAll(EDIT_SELECTOR);
+  for (const e of els) {
+    if (e.dataset.dirty) return true;
+  }
+  return false;
+}
+document.addEventListener('input', e => {
+  if (e.target && e.target.matches && e.target.matches(EDIT_SELECTOR)) {
+    e.target.dataset.dirty = '1'; UNSAVED = true;
+  }
+});
+document.addEventListener('change', e => {
+  if (e.target && e.target.matches && e.target.matches(EDIT_SELECTOR)) {
+    e.target.dataset.dirty = '1'; UNSAVED = true;
+  }
+});
+function clearDirty() {
+  document.querySelectorAll(EDIT_SELECTOR).forEach(el => { delete el.dataset.dirty; });
+  UNSAVED = false;
+}
+
+/* ================= 概览：统计卡片 ================= */
+
+function renderStats(s) {
+  const q = s.summary || {}, u = s.usage || {};
+  const budget = CFG?.brain?.daily_budget || 0;
+  const items = [
+    ['今日调用 / 预算', (u.calls ?? 0) + ' / ' + (budget || '∞')],
+    ['今日说话 / 闭嘴', (u.said ?? 0) + ' / ' + (u.quiet ?? 0)],
+    ['今日 token 用量', fmtTok((u.prompt_tokens ?? 0) + (u.output_tokens ?? 0))],
+    ['可用目标', (q.alive_count ?? 0) + ' / ' + (q.total_count ?? 0)],
+    ['累计调用 / 失败', (q.total_req ?? 0) + ' / ' + (q.fail_req ?? 0)],
+    ['最近成功', q.last_ok ?? '从未'],
+  ];
+  document.getElementById('stats').innerHTML = items.map(([k, v]) =>
+    `<div class="stat"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
+
+  const bar = document.getElementById('budget-bar');
+  if (bar) {
+    const pct = budget > 0 ? Math.min(100, (u.calls ?? 0) / budget * 100) : 0;
+    bar.innerHTML = `<div class="k" style="color:var(--dim);font-size:12px;margin-bottom:6px">
+      今日预算已用 ${(u.calls ?? 0)} / ${budget || '不限'}${u.last_model ? ' · 最近模型 ' + esc(u.last_model) : ''}</div>
+      <div style="height:8px;background:#0d1016;border-radius:4px;overflow:hidden">
+        <div style="height:100%;width:${pct.toFixed(1)}%;background:${pct > 90 ? 'var(--bad)' : 'var(--ok)'}"></div>
+      </div>`;
+  }
+}
+
+function fmtTok(n) {
+  n = +n || 0;
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+/* ================= 概览：分时段调用统计（SQLite 持久化） ================= */
+
+let USAGE_RANGE = 'today';
+const PALETTE = ['#4f8cff','#3ecf8e','#ffb454','#ff6b6b','#b78bff','#4fd1d1','#f472b6','#a3e635'];
+
+async function loadUsage() {
+  const box = document.getElementById('usage-chart');
+  const [r, st] = await Promise.all([
+    api('/api/usage_series?range=' + USAGE_RANGE),
+    api('/api/stats/status'),
+  ]);
+  if (st && st.ok) {
+    document.getElementById('usage-meta').textContent = st.enabled
+      ? `统计库 ${(st.db_size_bytes / 1024 / 1024).toFixed(2)} MB · 队列丢弃 ${st.dropped ?? 0} 条（明细保留 90 天）`
+      : '统计库未启用：打开失败已降级为纯内存统计，重启后清零。请看服务端日志。';
+  }
+  if (!r || !r.ok) { box.innerHTML = '<div class="muted">统计数据加载失败</div>'; return; }
+  if (!r.enabled) { box.innerHTML = '<div class="muted">统计库未启用（降级为纯内存）。分时段统计需要 SQLite 支持。</div>'; document.getElementById('usage-legend').innerHTML=''; return; }
+  renderUsageChart(r.buckets || []);
+}
+
+function renderUsageChart(buckets) {
+  const box = document.getElementById('usage-chart');
+  // 收集全部模型，排序后固定配色（同一模型跨时段同色）
+  const models = [...new Set(buckets.flatMap(b => Object.keys(b.models || {})))].sort();
+  const color = m => PALETTE[models.indexOf(m) % PALETTE.length];
+  const maxTotal = Math.max(1, ...buckets.map(b => b.total || 0));
+
+  const W = 720, H = 200, TOP = 14, BOT = 160, LBL = 178;
+  const n = Math.max(1, buckets.length);
+  const slot = (W - 16) / n, bw = Math.min(46, slot * 0.62);
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block">`;
+  // 基线
+  svg += `<line x1="8" y1="${BOT}" x2="${W-8}" y2="${BOT}" stroke="#262b36" stroke-width="1"/>`;
+  buckets.forEach((b, i) => {
+    const x = 8 + slot * i + (slot - bw) / 2;
+    let y = BOT;
+    models.forEach(m => {
+      const st = (b.models || {})[m];
+      if (!st || !st.calls) return;
+      const h = Math.max(1.5, st.calls / maxTotal * (BOT - TOP));
+      y -= h;
+      svg += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" fill="${color(m)}" rx="1"><title>${esc(m)} ${st.calls} 次${st.fails ? '（失败 ' + st.fails + '）' : ''} · token ${fmtTok(st.prompt_tokens + st.output_tokens)}</title></rect>`;
+    });
+    if (b.total > 0) {
+      svg += `<text x="${(x + bw / 2).toFixed(1)}" y="${(y - 4).toFixed(1)}" font-size="10" fill="#8b93a7" text-anchor="middle">${b.total}</text>`;
+    }
+    // X 轴标签：桶太多时隔格显示
+    const showLbl = n <= 12 || i % Math.ceil(n / 12) === 0;
+    if (showLbl) {
+      svg += `<text x="${(x + bw / 2).toFixed(1)}" y="${LBL}" font-size="9" fill="#5a6172" text-anchor="middle">${esc(b.label)}</text>`;
+    }
+  });
+  svg += '</svg>';
+  const grand = buckets.reduce((a, b) => a + (b.total || 0), 0);
+  box.innerHTML = grand === 0 ? '<div class="muted">该时间段内还没有任何调用记录。</div>' + svg : svg;
+
+  // 图例：模型 + 总次数 + 失败 + token
+  const agg = {};
+  buckets.forEach(b => models.forEach(m => {
+    const st = (b.models || {})[m];
+    if (!st) return;
+    agg[m] = agg[m] || {calls: 0, fails: 0, tok: 0};
+    agg[m].calls += st.calls; agg[m].fails += st.fails; agg[m].tok += (st.prompt_tokens || 0) + (st.output_tokens || 0);
+  }));
+  document.getElementById('usage-legend').innerHTML = models.filter(m => agg[m]).map(m =>
+    `<span class="li"><span class="sw" style="background:${color(m)}"></span>${esc(m)} <b style="color:var(--fg)">${agg[m].calls}</b> 次` +
+    (agg[m].fails ? ` · <span style="color:var(--bad)">失败 ${agg[m].fails}</span>` : '') +
+    ` · token ${fmtTok(agg[m].tok)}</span>`).join('');
+}
+
+document.querySelectorAll('.chart-tabs .ct').forEach(el => el.onclick = () => {
+  document.querySelectorAll('.chart-tabs .ct').forEach(x => x.classList.remove('on'));
+  el.classList.add('on');
+  USAGE_RANGE = el.dataset.r;
+  loadUsage();
+});
+
+// 最近调用明细（精确到秒）。聚合图看分布，这张表看「刚刚到底发生了什么」。
+async function loadRecent() {
+  const tb = document.querySelector('#recent tbody');
+  const r = await api('/api/recent_calls?limit=30');
+  if (!r || !r.ok) { tb.innerHTML = '<tr><td class="muted" colspan="8">加载失败</td></tr>'; return; }
+  if (!r.enabled) { tb.innerHTML = '<tr><td class="muted" colspan="8">统计库未启用（降级为纯内存），调用明细不可用。</td></tr>'; return; }
+  const rows = r.calls || [];
+  tb.innerHTML = rows.map(c => {
+    const failed = c.ok === false;
+    return `<tr>
+      <td class="muted">${esc(fmtClock(c.ts))}</td>
+      <td class="muted">${esc(c.endpoint_id)}</td>
+      <td>${esc(c.model)}</td>
+      <td style="color:${failed ? 'var(--bad)' : 'var(--ok)'}">${failed ? '失败' : '成功'}</td>
+      <td>${c.ttft_ms || '-'}</td>
+      <td>${c.latency_ms || '-'}</td>
+      <td class="muted">${c.prompt_tokens || 0} / ${c.output_tokens || 0}</td>
+      <td class="muted">${esc(c.err || '')}</td>
+    </tr>`;
+  }).join('') || '<tr><td class="muted" colspan="8">还没有任何调用记录。</td></tr>';
+}
+
+// 后端给的是 RFC3339 时间串，转成本地 HH:MM:SS
+function fmtClock(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso || '';
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/* ================= 概览：实际调度顺序 + 健康度表 + 连通性测试 ================= */
+
+// 实际调度顺序：复刻后端 Chat 的重试链路。
+// 后端 pick() 与这个预览共用同一套排序，所以看到的顺序就是真实尝试顺序；
+// 唯一的不确定来自 ε-贪心探路（8%，只在最高优先级档内随机）——如实标出来，不假装确定。
+function renderChain() {
+  const box = document.getElementById('chain');
+  const c = CHAIN || {};
+  const chain = c.chain || [];
+  if (!chain.length) {
+    box.innerHTML = '<div class="muted">没有可用的调用目标（全部被禁用／下线，或还没配置接入点）。</div>';
+    return;
+  }
+  const tierOf = (p) => p > 0 ? `第 ${p} 档` : '默认档（priority=0）';
+  const head = chain[0];
+  const rate = Math.round((c.explore_rate || 0) * 100);
+
+  // 第一行：下次会命中谁
+  let html = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+    <span style="font-size:15px">下次会命中</span>
+    <b style="font-size:15px;color:var(--ok)">${esc(head.label || head.model)}</b>
+    <span class="muted">${esc(head.endpoint_name || head.endpoint_id)} · ${esc(head.model)} · ${tierOf(head.priority)}</span>
+    <span class="muted">健康分 ${head.score.toFixed(3)}</span>
+    ${head.cooling ? '<span class="badge">冷却中，属于兜底路径</span>' : ''}
+  </div>`;
+
+  if (head.explore_hit) {
+    html += `<div class="muted" style="margin-bottom:10px;color:var(--warn)">
+      注意：这一档里有多个候选，每次调用有约 ${rate}% 概率在本档内随机探路——也就是说「下一个」不是 100% 确定的。
+      不带探路时，确定顺序如下。</div>`;
+  }
+  if (c.all_dead) {
+    html += `<div class="muted" style="margin-bottom:10px;color:var(--bad)">
+      当前所有启用的目标都被判定为不可用。真要调用时会先放开全部限制重新探测一轮（下面的顺序是放开后的顺序）。</div>`;
+  }
+
+  html += `<table><thead><tr>
+      <th>顺序</th><th>触发条件</th><th>档位</th><th>接入点</th><th>模型</th><th>健康分</th><th>已验证</th>
+    </tr></thead><tbody>`;
+  chain.forEach((e, i) => {
+    const cond = i === 0 ? '首先尝试'
+      : e.cooling ? `前面 ${i} 个都失败后（它冷却中，仅兜底）`
+      : `前面 ${i} 个都失败后`;
+    html += `<tr>
+      <td><b>${e.rank}</b></td>
+      <td class="muted">${esc(cond)}</td>
+      <td>${esc(tierOf(e.priority))}${e.explore && !e.cooling ? ` <span class="muted" title="本档有多个候选，可能被随机探路命中">探路 ${rate}%</span>` : ''}</td>
+      <td>${esc(e.endpoint_name || e.endpoint_id)}<div class="muted">${esc(e.endpoint_id)}</div></td>
+      <td>${esc(e.label || e.model)}<div class="muted">${esc(e.model)}</div></td>
+      <td>${e.score.toFixed(3)}</td>
+      <td class="muted">${e.total > 0 ? e.total + ' 次' : '还没试过'}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  html += `<div class="muted" style="margin-top:8px">最多尝试 ${c.max_attempts || 4} 个目标；优先级是<b>硬分层</b>，高优先级还活着就轮不到下一档。</div>`;
+  box.innerHTML = html;
+}
+
+function renderTargets() {
+  renderChain();
+  // 命中序 = 这个目标在真实调度链路里排第几（—— 表示本轮轮不到）
+  const rankOf = {};
+  (CHAIN?.chain || []).forEach(e => { rankOf[e.endpoint_id + '|' + e.model] = e.rank; });
+  const tb = document.querySelector('#targets tbody');
+  tb.innerHTML = TARGETS.map((t) => {
+    let color = 'var(--ok)', state = '可用';
+    if (!t.enabled) { color = '#5a6172'; state = '已禁用'; }
+    else if (t.dead) { color = 'var(--bad)'; state = '已下线'; }
+    else if (t.cooling) { color = 'var(--warn)'; state = '冷却 ' + Math.ceil(t.cooldown_sec) + 's'; }
+    const rank = rankOf[t.endpoint_id + '|' + t.model];
+    return `<tr>
+      <td><span class="dot" style="background:${color}"></span>${esc(state)}</td>
+      <td>${rank ? `<b style="color:var(--acc)">${rank}</b>` : '<span class="muted">—</span>'}</td>
+      <td>${t.priority ?? 0}</td>
+      <td>${esc(t.endpoint_name)}<div class="muted">${esc(t.endpoint_id)}</div></td>
+      <td>${esc(t.model)}${t.label && t.label !== t.model ? `<div class="muted">${esc(t.label)}</div>` : ''}</td>
+      <td>${t.score.toFixed(3)}</td>
+      <td>${t.ttft_ms ? t.ttft_ms.toFixed(0) : '-'}</td>
+      <td>${t.latency_ms ? t.latency_ms.toFixed(0) : '-'}</td>
+      <td>${(t.success_rate * 100).toFixed(0)}%</td>
+      <td>${t.total}<div class="muted">失败 ${t.fails}</div></td>
+      <td class="muted">${esc(t.last_error || '')}</td>
+      <td style="white-space:nowrap">
+        <button class="ghost sm" onclick="toggle('${escJ(t.endpoint_id)}','${escJ(t.model)}',${!t.enabled})">${t.enabled ? '禁用' : '启用'}</button>
+        <button class="ghost sm" onclick="reset('${escJ(t.endpoint_id)}','${escJ(t.model)}')">重置</button>
+      </td></tr>`;
+  }).join('') || '<tr><td class="muted" colspan="12">还没有配置任何接入点</td></tr>';
+
+  const eps = CFG?.llm?.endpoints || [];
+  const eSel = document.getElementById('t-ep'), mSel = document.getElementById('t-model');
+  // 用户正展开/操作下拉时不重建，否则 5 秒轮询会把选择冲掉
+  const active = document.activeElement;
+  if (active !== eSel && active !== mSel) {
+    const keepE = eSel.value, keepM = mSel.value;
+    eSel.innerHTML = eps.map(e => `<option value="${esc(e.id)}">${esc(e.name || e.id)}</option>`).join('');
+    if (keepE && eps.some(e => e.id === keepE)) eSel.value = keepE;
+    fillModels();
+    if (keepM) mSel.value = keepM;
+  }
+}
+
+function fillModels() {
+  const id = document.getElementById('t-ep').value;
+  const ep = (CFG?.llm?.endpoints || []).find(e => e.id === id);
+  document.getElementById('t-model').innerHTML =
+    (ep?.models || []).map(m => `<option value="${esc(m.id)}">${esc(m.label || m.id)}</option>`).join('');
+}
+
+async function toggle(ep, model, enabled) {
+  // 这个接口会推进服务端 rev。早期这里只 loadState() 不标记重画，
+  // 结果用户编辑表单时点一下开关，之后保存必 409（基线永远落后）。
+  await api('/api/toggle', {endpoint_id: ep, model, enabled});
+  FORCE_REDRAW = true; loadState();
+}
+async function reset(ep, model) {
+  const r = await api('/api/reset', {endpoint_id: ep, model});
+  FORCE_REDRAW = true; loadState(); toast('已重置该目标状态');
+}
+async function runTest() {
+  const out = document.getElementById('t-out');
+  out.textContent = '请求中…';
+  const r = await api('/api/test', {
+    endpoint_id: document.getElementById('t-ep').value,
+    model: document.getElementById('t-model').value,
+    prompt: document.getElementById('t-prompt').value
+  });
+  out.textContent = r.ok
+    ? `成功 · ${r.model} · 首字 ${r.ttft_ms.toFixed(0)}ms · 总计 ${r.cost_ms.toFixed(0)}ms\n\n${r.content}`
+    : `失败 · ${r.msg}`;
+}
+
+/* ================= 接入点：调度顺序拖拽面板 =================
+   所有启用模型跨接入点排一列，上 = 最优先。
+   拖拽结束后按行序重编 priority（N 个模型 → N,N-1,…,1，数字大 = 优先级高）。 */
+
+function renderOrder() {
+  const box = document.getElementById('order');
+  const items = [];
+  (CFG?.llm?.endpoints || []).forEach(e => {
+    if (!e.enabled) return;
+    (e.models || []).forEach(m => {
+      if (m.enabled) items.push({ep: e.id, epName: e.name || e.id, id: m.id, label: m.label || m.id, priority: m.priority || 0});
+    });
+  });
+  items.sort((a, b) => (b.priority - a.priority) || a.label.localeCompare(b.label));
+  box.innerHTML = items.map((it, i) =>
+    `<div class="sitem" draggable="true" data-ep="${esc(it.ep)}" data-m="${esc(it.id)}">
+      <span class="grip">☰</span><span class="rank">${i + 1}</span>
+      <span>${esc(it.label)}</span><span class="muted">${esc(it.epName)} · ${esc(it.id)}</span>
+      <span class="muted" style="margin-left:auto">priority ${it.priority}</span>
+    </div>`).join('') || '<div class="muted">没有启用的模型。先在下面的接入点里加模型并启用。</div>';
+  bindDrag(box);
+}
+
+function bindDrag(box) {
+  let dragEl = null;
+  box.querySelectorAll('.sitem').forEach(el => {
+    el.addEventListener('dragstart', () => { dragEl = el; DRAGGING = true; el.classList.add('drag'); });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('drag'); DRAGGING = false;
+      renumberOrder(box);
+    });
+    el.addEventListener('dragover', e => {
+      e.preventDefault();
+      if (!dragEl || dragEl === el) return;
+      const r = el.getBoundingClientRect();
+      const after = (e.clientY - r.top) > r.height / 2;
+      el.parentNode.insertBefore(dragEl, after ? el.nextSibling : el);
+    });
+  });
+}
+
+function renumberOrder(box) {
+  const els = [...box.querySelectorAll('.sitem')];
+  const n = els.length;
+  els.forEach((el, i) => {
+    const p = n - i; // 顶部最大
+    const ep = (CFG.llm.endpoints || []).find(e => e.id === el.dataset.ep);
+    const m = ep && (ep.models || []).find(x => x.id === el.dataset.m);
+    if (m && m.priority !== p) { m.priority = p; UNSAVED = true; }
+  });
+  renderOrder();
+  renderEndpoints(); // 让下面卡片里的 priority 输入框同步
+}
+
+/* ================= 接入点：卡片编辑 ================= */
+
+function renderEndpoints() {
+  const box = document.getElementById('eps');
+  if (!box.dataset.bound) {
+    box.addEventListener('input', () => syncFromForm());
+    box.dataset.bound = '1';
+  }
+  box.innerHTML = (CFG?.llm?.endpoints || []).map((e, ei) => `
+    <div class="ep ${e.enabled ? '' : 'off'}" data-ei="${ei}">
+      <div class="row">
+        <label>名称</label><div class="fld" style="max-width:260px"><input data-f="name" value="${esc(e.name)}">
+          <small class="hint">给自己看的名字。</small></div>
+        <label style="width:46px">标识</label><div class="fld" style="max-width:200px"><input data-f="id" value="${esc(e.id)}">
+          <small class="hint">唯一 ID。<b>改名会让该接入点下所有模型的统计重新计数</b>。</small></div>
+        <label class="switch"><input type="checkbox" data-f="enabled" ${e.enabled ? 'checked' : ''} style="width:auto">启用</label>
+        <button class="danger sm" style="margin-left:auto" onclick="delEndpoint(${ei})">删除接入点</button>
+      </div>
+      <div class="row"><label>Base URL</label><div class="fld"><input data-f="base_url" value="${esc(e.base_url)}">
+        <small class="hint">OpenAI 兼容接口地址，一般到 /v1 为止。例：https://openrouter.ai/api/v1</small></div></div>
+      <div class="row"><label>接口格式</label><div class="fld" style="max-width:240px">
+        <select data-f="api_type">
+          <option value="chat_completions"${e.api_type !== 'responses' ? ' selected' : ''}>/chat/completions</option>
+          <option value="responses"${e.api_type === 'responses' ? ' selected' : ''}>/responses</option>
+        </select>
+        <small class="hint">OpenRouter 两种都提供，路径和报文结构不同，选错会 404。不确定就用 /chat/completions。</small></div></div>
+      <div class="row"><label>API Key</label><div class="fld"><input data-f="api_key" value="${esc(e.api_key)}" placeholder="留空表示不修改">
+        <small class="hint">页面只显示掩码。留空 = 保持服务器上的原 key 不变；填新值 = 替换。</small></div>
+        <span class="muted" style="flex:none">超时(ms)</span><div class="fld" style="max-width:110px"><input data-f="timeout_ms" type="number" value="${e.timeout_ms}">
+        <small class="hint">建议 60000</small></div></div>
+      <div style="margin-top:10px" class="muted">模型（优先级建议用上方「调度顺序」拖拽，别手填数字）</div>
+      ${(e.models || []).map((m, mi) => `
+        <div class="mline" data-mi="${mi}">
+          <span class="tag">ID</span><input data-mf="id" value="${esc(m.id)}" placeholder="如 deepseek-flash" title="模型 ID，要和服务商后台完全一致。改 ID 会让该模型统计重新计数">
+          <span class="tag">别名</span><input data-mf="label" value="${esc(m.label)}" style="max-width:130px">
+          <span class="tag" title="数字越大越优先（硬分层）。建议用上方拖拽排序">优先级</span><input data-mf="priority" type="number" value="${m.priority || 0}" style="max-width:64px">
+          <span class="tag" title="模型上下文窗口。12K 够用、16K 稳妥、32K 舒适，8K 会撞上下文预算">max_ctx</span><input data-mf="max_ctx" type="number" value="${m.max_ctx || 0}" style="max-width:100px">
+          <span class="tag" title="单次最大输出 token。带思维链的模型要给足（1024~2048），否则可能回复空内容">max_out</span><input data-mf="max_out" type="number" value="${m.max_out}" style="max-width:84px">
+          <label class="switch" title="支持图片/视频帧输入的多模态模型才勾，否则图片会被降级成纯文本"><input type="checkbox" data-mf="vision" ${m.vision ? 'checked' : ''} style="width:auto">多模态</label>
+          <label class="switch"><input type="checkbox" data-mf="enabled" ${m.enabled ? 'checked' : ''} style="width:auto">启用</label>
+          <label class="switch" title="流式输出首字更快，建议开"><input type="checkbox" data-mf="stream" ${m.stream ? 'checked' : ''} style="width:auto">流式</label>
+          <button class="danger sm" onclick="delModel(${ei},${mi})">删除</button>
+        </div>`).join('') || '<div class="muted">暂无模型</div>'}
+      <button class="ghost sm" style="margin-top:10px" onclick="addModel(${ei})">添加模型</button>
+    </div>`).join('') || '<div class="muted">还没有接入点，点右上角「新增接入点」。</div>';
+}
+
+// 增删行同样算「未保存的修改」：不置 UNSAVED 的话，5 秒轮询撞上 rev 变化会把新行冲掉
+function addEndpoint() {
+  UNSAVED = true;
+  CFG.llm.endpoints = CFG.llm.endpoints || [];
+  CFG.llm.endpoints.push({id: 'ep' + Date.now(), name: '新接入点', base_url: 'https://openrouter.ai/api/v1',
+    api_key: '', api_type: 'chat_completions', enabled: true, timeout_ms: 60000, models: []});
+  renderEndpoints(); renderOrder();
+}
+function delEndpoint(ei) { UNSAVED = true; CFG.llm.endpoints.splice(ei, 1); renderEndpoints(); renderOrder(); }
+function addModel(ei) {
+  UNSAVED = true;
+  const ep = CFG.llm.endpoints[ei];
+  if (!ep) return;
+  ep.models = ep.models || []; // Go nil 切片序列化成 null，不兜底 push 会直接抛错（旧 bug：点了没反应）
+  ep.models.push({id: '', label: '', priority: 0, enabled: true, vision: false, max_ctx: 65536, max_out: 1024, stream: true});
+  renderEndpoints();
+}
+function delModel(ei, mi) { UNSAVED = true; CFG.llm.endpoints[ei].models.splice(mi, 1); renderEndpoints(); renderOrder(); }
+
+function syncFromForm() {
+  document.querySelectorAll('#eps .ep').forEach(el => {
+    const e = CFG.llm.endpoints[+el.dataset.ei];
+    if (!e) return;
+    el.querySelectorAll('[data-f]').forEach(inp => {
+      const f = inp.dataset.f;
+      if (inp.type === 'checkbox') e[f] = inp.checked;
+      else if (f === 'timeout_ms') e[f] = +inp.value || 0;
+      else if (!(f === 'api_key' && !inp.value)) e[f] = inp.value; // 留空表示不改 key
+    });
+    el.querySelectorAll('.mline').forEach(ml => {
+      const mi = +ml.dataset.mi;
+      if (!e.models) e.models = [];
+      // 越界时按 DOM 行补齐，而不是直接丢弃：界面上看得见的行就是用户认的事实，
+      // 万一 CFG 意外变短（轮询/异常/竞态），也不能把已经填好的内容吞掉。
+      if (!e.models[mi]) {
+        e.models[mi] = {id: '', label: '', priority: 0, enabled: true, vision: false,
+          max_ctx: 65536, max_out: 1024, stream: true};
+      }
+      const m = e.models[mi];
+      ml.querySelectorAll('[data-mf]').forEach(inp => {
+        const f = inp.dataset.mf;
+        if (inp.type === 'checkbox') m[f] = inp.checked;
+        else if (f === 'max_out' || f === 'max_ctx' || f === 'priority') m[f] = +inp.value || 0;
+        else m[f] = inp.value;
+      });
+    });
+  });
+}
+
+/* ================= 人设与策略 ================= */
+
+const lines = v => (v || '').split('\n').map(s => s.trim()).filter(Boolean);
+function renderPersona() {
+  const p = CFG?.persona || {}, b = CFG?.brain || {};
+  document.getElementById('pf-name').value = p.name || '';
+  document.getElementById('pf-bg').value = p.background || '';
+  document.getElementById('pf-style').value = p.style || '';
+  document.getElementById('pf-catch').value = (p.catchphrases || []).join('\n');
+  document.getElementById('pf-roast').value = (p.roast_rules || []).join('\n');
+  document.getElementById('pf-red').value = (p.red_lines || []).join('\n');
+  document.getElementById('pf-silence').value = (p.silence_rules || []).join('\n');
+  document.getElementById('pf-refuse').value = (p.refuse_rules || []).join('\n');
+  document.getElementById('pf-loyalty').value = p.loyalty || '';
+  document.getElementById('pf-max').value = p.max_chars || 0;
+  document.getElementById('bf-budget').value = b.daily_budget || 0;
+  document.getElementById('bf-imp').value = b.impulse_threshold || 0;
+  document.getElementById('bf-hist').value = b.max_history || 0;
+  document.getElementById('bf-temp').value = b.temperature || 0;
+  document.getElementById('bf-out').value = b.max_out_tokens || 0;
+  document.getElementById('bf-deb').value = b.debounce_sec || 0;
+  document.getElementById('bf-debj').value = b.debounce_jitter_sec || 0;
+  document.getElementById('bf-ctx').value = b.max_ctx_tokens || 0;
+  document.getElementById('bf-minsp').value = b.min_speak_interval_sec || 0;
+  const sp = CFG?.speak || {};
+  document.getElementById('sf-maxseg').value = sp.max_segments || 0;
+  document.getElementById('sf-maxchar').value = sp.max_seg_chars || 0;
+  document.getElementById('sf-min').value = sp.min_delay_ms || 0;
+  document.getElementById('sf-max').value = sp.max_delay_ms || 0;
+  document.getElementById('sf-per').value = sp.per_char_ms || 0;
+  document.getElementById('sf-first').value = sp.first_delay_ms || 0;
+  document.getElementById('sf-eager').value = sp.eager_scale || 0;
+  document.getElementById('sf-ramp').value = sp.tail_ramp || 0;
+  const mp = CFG?.meme_pool || {};
+  document.getElementById('mp-on').checked = !!mp.enabled;
+  document.getElementById('mp-maxpool').value = mp.max_pool || 0;
+  document.getElementById('mp-residency').value = mp.max_residency_days || 0;
+  document.getElementById('mp-optint').value = mp.opt_interval_hours || 0;
+  document.getElementById('mp-rounds').value = mp.max_tool_rounds || 0;
+  document.getElementById('mp-maximg').value = mp.max_images_per_reply || 0;
+}
+function renderQQ() {
+  const q = CFG?.qq || {};
+  document.getElementById('qf-sandbox').checked = !!q.sandbox;
+  document.getElementById('qf-passive').checked = !!q.prefer_passive;
+  document.getElementById('qf-sign').checked = !!q.require_signature;
+}
+function collectPersona() {
+  CFG.persona.name = document.getElementById('pf-name').value;
+  CFG.persona.background = document.getElementById('pf-bg').value;
+  CFG.persona.style = document.getElementById('pf-style').value;
+  CFG.persona.catchphrases = lines(document.getElementById('pf-catch').value);
+  CFG.persona.roast_rules = lines(document.getElementById('pf-roast').value);
+  CFG.persona.red_lines = lines(document.getElementById('pf-red').value);
+  CFG.persona.silence_rules = lines(document.getElementById('pf-silence').value);
+  CFG.persona.refuse_rules = lines(document.getElementById('pf-refuse').value);
+  CFG.persona.loyalty = document.getElementById('pf-loyalty').value;
+  CFG.persona.max_chars = +document.getElementById('pf-max').value || 0;
+  CFG.brain.daily_budget = +document.getElementById('bf-budget').value || 0;
+  CFG.brain.impulse_threshold = +document.getElementById('bf-imp').value || 0;
+  CFG.brain.max_history = +document.getElementById('bf-hist').value || 0;
+  CFG.brain.temperature = +document.getElementById('bf-temp').value || 0;
+  CFG.brain.max_out_tokens = +document.getElementById('bf-out').value || 0;
+  CFG.brain.debounce_sec = +document.getElementById('bf-deb').value || 0;
+  CFG.brain.debounce_jitter_sec = +document.getElementById('bf-debj').value || 0;
+  CFG.brain.max_ctx_tokens = +document.getElementById('bf-ctx').value || 0;
+  CFG.brain.min_speak_interval_sec = +document.getElementById('bf-minsp').value || 0;
+  CFG.speak = CFG.speak || {};
+  CFG.speak.max_segments = +document.getElementById('sf-maxseg').value || 0;
+  CFG.speak.max_seg_chars = +document.getElementById('sf-maxchar').value || 0;
+  CFG.speak.min_delay_ms = +document.getElementById('sf-min').value || 0;
+  CFG.speak.max_delay_ms = +document.getElementById('sf-max').value || 0;
+  CFG.speak.per_char_ms = +document.getElementById('sf-per').value || 0;
+  CFG.speak.first_delay_ms = +document.getElementById('sf-first').value || 0;
+  CFG.speak.eager_scale = +document.getElementById('sf-eager').value || 0;
+  CFG.speak.tail_ramp = +document.getElementById('sf-ramp').value || 0;
+  CFG.master = CFG.master || {};
+  CFG.master.nickname = document.getElementById('mf-nick').value;
+  CFG.master.qq = document.getElementById('mf-qq').value;
+  CFG.master.bind_token = document.getElementById('mf-token').value;
+  CFG.master.bind_enabled = document.getElementById('mf-bindon').checked;
+  CFG.qq.sandbox = document.getElementById('qf-sandbox').checked;
+  CFG.qq.prefer_passive = document.getElementById('qf-passive').checked;
+  CFG.qq.require_signature = document.getElementById('qf-sign').checked;
+  // 只回传这六个标量：minio 段（含密钥）整块留给服务端保留，前端不碰
+  CFG.meme_pool = CFG.meme_pool || {};
+  CFG.meme_pool.enabled = document.getElementById('mp-on').checked;
+  CFG.meme_pool.max_pool = +document.getElementById('mp-maxpool').value || 0;
+  CFG.meme_pool.max_residency_days = +document.getElementById('mp-residency').value || 0;
+  CFG.meme_pool.opt_interval_hours = +document.getElementById('mp-optint').value || 0;
+  CFG.meme_pool.max_tool_rounds = +document.getElementById('mp-rounds').value || 0;
+  CFG.meme_pool.max_images_per_reply = +document.getElementById('mp-maximg').value || 0;
+}
+
+/* ================= 表情包池 ================= */
+
+// 池列表。刻意只给「看」和「删」：描述是模型优选时写的，
+// 人改了下一轮优选又会被覆盖回去，给一个改了会被悄悄改掉的输入框纯属误导。
+async function loadMemes() {
+  const box = document.getElementById('mp-list');
+  const r = await api('/api/memes');
+  if (!box) return;
+  if (!r || !r.ok) { box.textContent = '读取失败'; return; }
+  if (!r.enabled) { box.innerHTML = '<span class="muted">表情包池未启用（config.json 里 meme_pool.enabled 为 false，或 MinIO 没配通）。</span>'; return; }
+  const ms = r.memes || [];
+  if (!ms.length) { box.innerHTML = '<span class="muted">池子是空的——等群里有人发图，它自己判断合适就会收进来。</span>'; return; }
+  const rows = ms.map(m => {
+    // 走同源代理而不是 MinIO 直链：管理端是 https、MinIO 是 http，
+    // 混合内容浏览器会直接拦（右键打开却能用，很容易误判成链接坏了）
+    const img = `<img src="${PREFIX}/api/meme/img?id=${m.id}" style="width:56px;height:56px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:8px;background:#eee">`;
+    const exp = m.expires_in >= 0 ? `${m.expires_in} 天后淘汰` : '已到期';
+    return `<div class="row" style="align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--line,#eee)">
+      <div style="flex:0 0 auto">${img}</div>
+      <div style="flex:1 1 auto;min-width:0">
+        <div>#${m.rank} · ${esc(m.descr)}</div>
+        <small class="hint">用过 ${m.uses} 次 · 优选分 ${(+m.quality).toFixed(2)} · 此刻好感度 ${(+m.affection).toFixed(2)} · ${exp}</small>
+      </div>
+      <button class="ghost sm" onclick="delMeme(${m.id})">删除</button>
+    </div>`;
+  }).join('');
+  box.innerHTML = `<div class="muted" style="margin-bottom:4px">共 ${ms.length} / ${r.max_pool} 张</div>` + rows;
+}
+
+async function delMeme(id) {
+  if (!confirm('删掉这张？MinIO 上的文件也会一起删掉，不可恢复。')) return;
+  const r = await api('/api/memes/delete', {id});
+  if (r && r.ok) { toast('已删除'); loadMemes(); }
+  else toast((r && r.msg) || '删除失败', true);
+}
+
+/* ================= 保存（含 409 冲突处理） ================= */
+
+// 放弃本地未保存的修改，重新拉取服务端配置。
+// 修掉「轮询会把 CFG 冲掉」之后，未保存的改动会一直留着（这是对的），
+// 所以需要一个显式的退出方式——否则误点「添加模型」之类就只能靠刷新页面。
+async function reloadConfig() {
+  if (editingBusy() && !confirm('这会丢弃你还没保存的修改，并重新从服务端拉取配置。\n\n确认放弃？')) return;
+  document.getElementById('ovl').classList.add('hide'); // 顺手关掉可能开着的 409 弹层
+  DRAGGING = false;
+  clearDirty();
+  await loadState(true);
+  toast('已重新加载服务端配置');
+}
+
+async function saveCfg() {
+  syncFromForm(); collectPersona(); collectSchedule();
+  // 保存前校验：模型 id 为空或还是占位符的，保存后调用必 404，不如当场拦住
+  for (const e of (CFG.llm.endpoints || [])) {
+    for (const m of (e.models || [])) {
+      const id = (m.id || '').trim();
+      if (!id || id.includes('vendor/')) { toast(`接入点「${e.name || e.id}」里有模型 ID 没填或还是占位符，请先改好`, true); return; }
+    }
+  }
+  // 信封带 rev：服务端发现页面数据过期会 409 拒绝，避免多标签页静默互相覆盖
+  const r = await api('/api/config', {rev: LAST_REV, config: CFG});
+  if (r && r.ok) {
+    clearDirty();
+    // loadState(true) 会用服务端最新 rev 重设基线，无需（也不该）手工置 -1
+    toast('已保存并生效'); loadState(true);
+  }
+  else if (r && r._status === 409) {
+    // 409：配置在别处被改过，弹层给出三条路，不再只是一个 toast 让人干瞪眼
+    document.getElementById('ovl-msg').textContent =
+      (r.msg || '配置已在别处被修改') + '。你可以丢弃本地修改拉取最新，或确认无误后强制覆盖。';
+    document.getElementById('ovl').classList.remove('hide');
+  }
+  else toast((r && r.msg) || '保存失败', true);
+}
+function ovlCancel() { document.getElementById('ovl').classList.add('hide'); }
+async function ovlDiscard() {
+  document.getElementById('ovl').classList.add('hide');
+  clearDirty();
+  await loadState(true); // 强制拉服务端最新并重设 rev 基线
+  toast('已拉取最新配置，请重新编辑');
+}
+async function ovlForce() {
+  // 先把页面上正在编辑的内容收进 CFG——少了这三行，发出的其实是被轮询刷新过的
+  // 服务端配置，用户自己刚改的东西反而会丢，与按钮名字完全相反。
+  syncFromForm(); collectPersona(); collectSchedule();
+  if (!confirm('强制覆盖会跳过并发检查，用当前页面上的配置整包覆盖服务端。\n\n' +
+    '如果服务端有你刚在别处（另一个标签页、另一台设备）做的修改，那些修改会被覆盖掉。\n\n确认继续？')) return;
+  const r = await api('/api/config', {rev: -1, config: CFG}); // rev=-1 跳过乐观锁
+  if (r && r.ok) {
+    document.getElementById('ovl').classList.add('hide');
+    clearDirty(); toast('已强制覆盖并生效'); loadState(true);
+  } else {
+    // 失败时故意不关弹层：用户还能改走「丢弃本地修改并刷新」这条路
+    toast((r && r.msg) || '强制保存失败', true);
+  }
+}
+
+/* ================= 群与主人 ================= */
+
+function renderMaster(s) {
+  const m = (s && s.master) || CFG?.master || {};
+  document.getElementById('mf-nick').value = m.nickname || '';
+  document.getElementById('mf-qq').value = m.qq || '';
+  document.getElementById('mf-token').value = m.bind_token || '';
+  document.getElementById('mf-bindon').checked = !!m.bind_enabled;
+  const ids = m.openids || [];
+  document.getElementById('mf-count').textContent = ids.length;
+  document.getElementById('mf-list').innerHTML = ids.length
+    ? ids.map(id => `<div>${esc(id)} <button class="ghost sm" onclick="unbind('${escJ(id)}')">解绑</button></div>`).join('')
+    : '（还没绑定任何人。可以在下面的群成员列表里点「设为主人」，或在群里发认主口令）';
+}
+
+// 说明：这些「轻量写」都用 FORCE_REDRAW 请求重画，而不是 LAST_REV = -1。
+// 后者会让下一次保存发出 rev=-1，服务端 clientRev >= 0 不成立 → 乐观锁被静默跳过。
+async function bind(openid, name) {
+  const r = await api('/api/bind', {openid, name});
+  if (r && r.ok) { toast('已设为主人'); FORCE_REDRAW = true; loadState(); } else toast((r && r.msg) || '绑定失败', true);
+}
+async function unbind(openid) {
+  const r = await api('/api/unbind', {openid});
+  if (r && r.ok) { toast('已解绑'); FORCE_REDRAW = true; loadState(); } else toast((r && r.msg) || '解绑失败', true);
+}
+async function mute(openid) {
+  const r = await api('/api/mute', {openid, minutes: 30});
+  if (r && r.ok) { toast('已静默 30 分钟'); FORCE_REDRAW = true; loadState(); } else toast((r && r.msg) || '操作失败', true);
+}
+// 群别名：change 即存的轻量写，不走 rev 乐观锁
+async function saveAlias(openid, el) {
+  const r = await api('/api/group/alias', {openid, name: el.value});
+  if (r && r.ok) { toast('别名已保存'); FORCE_REDRAW = true; loadState(); }
+  else toast((r && r.msg) || '别名保存失败', true);
+}
+async function removeGroup(openid, name) {
+  if (!confirm(`确认移除群「${name || openid}」的全部数据？\n（记住的事、成员画像都会删掉；别名配置保留，机器人哪天被拉回群会自动复活）`)) return;
+  const r = await api('/api/group/remove', {openid});
+  if (r && r.ok) { toast('已移除该群数据'); FORCE_REDRAW = true; loadState(); }
+  else toast((r && r.msg) || '移除失败', true);
+}
+
+/* ---- 长期记忆编辑：与别名一样是 change 即存的轻量写，不走 rev 乐观锁 ---- */
+
+// 把零值时间（老文件里的要点没有时间戳）显示成「较早」，而不是 0001 年
+function relTime(iso) {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (!t || new Date(iso).getFullYear() < 2000) return '较早';
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 60) return '刚刚';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+  return Math.floor(s / 86400) + ' 天前';
+}
+async function saveFact(openid, key, el) {
+  const r = await api('/api/group/fact/set', {openid, key, value: el.value});
+  if (r && r.ok) {
+    toast(r.evicted ? `已保存（满了，挤掉了最旧的「${r.evicted}」）` : '长期记忆已保存');
+    FORCE_REDRAW = true; loadState();
+  } else toast((r && r.msg) || '保存失败', true);
+}
+async function addFact(openid, btn) {
+  const ins = btn.parentElement.querySelectorAll('input');
+  const key = (ins[0].value || '').trim(), value = (ins[1].value || '').trim();
+  if (!key || !value) { toast('要点和内容都要填', true); return; }
+  const r = await api('/api/group/fact/set', {openid, key, value});
+  if (r && r.ok) {
+    ins[0].value = ''; ins[1].value = '';
+    toast(r.evicted ? `已记住（满了，挤掉了最旧的「${r.evicted}」）` : '已记住');
+    FORCE_REDRAW = true; loadState();
+  } else toast((r && r.msg) || '添加失败', true);
+}
+async function delFact(openid, key) {
+  if (!confirm(`删掉这条长期记忆？\n「${key}」\n（以后它就不记得这件事了）`)) return;
+  const r = await api('/api/group/fact/delete', {openid, key});
+  if (r && r.ok) { toast('已删掉这条记忆'); FORCE_REDRAW = true; loadState(); }
+  else toast((r && r.msg) || '删除失败', true);
+}
+
+// 长期记忆区块：可看、可改、可删、可新增。
+// 满了以后后端会按「最久没更新」自动淘汰，界面通过 toast 说明挤掉了哪条。
+function renderFactsBox(g) {
+  const items = g.facts_items || [];
+  const max = g.facts_max || 24;
+  const full = items.length >= max;
+  const body = items.map(it => `<div class="row" style="gap:6px;align-items:center">
+      <span style="min-width:120px;word-break:break-all">${esc(it.key)}</span>
+      <div class="fld" style="flex:1"><input class="fact-input" value="${esc(it.value)}"
+        onchange="saveFact('${escJ(g.openid)}','${escJ(it.key)}', this)"></div>
+      <span class="muted" style="min-width:64px">${esc(relTime(it.updated_at))}</span>
+      <button class="danger sm" onclick="delFact('${escJ(g.openid)}','${escJ(it.key)}')">删除</button>
+    </div>`).join('') || '<div class="muted">（还没记住任何事）</div>';
+  return `<details style="margin-top:8px">
+    <summary class="muted">长期记忆 (${items.length}/${max})</summary>
+    <div style="margin-top:8px">
+      <div class="muted" style="margin-bottom:6px">这些事每轮都会喂给模型，改完立即生效。${
+        full ? '已满，再记新的会自动挤掉最久没更新的那条。' : '还没满，它自己也会往里记。'}</div>
+      ${body}
+      <div class="row" style="gap:6px;margin-top:8px">
+        <div class="fld" style="width:150px"><input class="fact-input" placeholder="要点（如 群主叫啥）"></div>
+        <div class="fld" style="flex:1"><input class="fact-input" placeholder="内容（如 叫小明，杭州人）"></div>
+        <button class="ghost sm" onclick="addFact('${escJ(g.openid)}', this)">加一条</button>
+      </div>
+    </div>
+  </details>`;
+}
+
+function renderGroups(s) {
+  const box = document.getElementById('groups');
+  const list = (s && s.groups) || [];
+  box.innerHTML = list.map(g => {
+    const display = g.alias || g.name || g.openid;
+    return `
+    <div class="ep ${g.left ? 'off' : ''}">
+      <div class="row">
+        <label>群</label><span>${esc(display)}${g.left ? '<span class="badge">已退群</span>' : ''}</span>
+        <span class="muted">${esc(g.openid.slice(-8))} · 冷场 ${esc(g.idle)} · 上下文 ${g.recent} 条</span>
+        <span style="margin-left:auto;display:flex;gap:6px">
+          <button class="ghost sm" onclick="mute('${escJ(g.openid)}')">静默30分钟</button>
+          ${g.left ? `<button class="danger sm" onclick="removeGroup('${escJ(g.openid)}','${escJ(display)}')">移除</button>` : ''}
+        </span>
+      </div>
+      <div class="row">
+        <label>别名</label>
+        <div class="fld" style="max-width:260px"><input class="alias-input" value="${esc(g.alias || '')}"
+          placeholder="给这个群起个名字（只给自己看）"
+          onchange="saveAlias('${escJ(g.openid)}', this)"></div>
+        <span class="muted">当前显示名：${esc(display)}${g.alias ? '' : '（未设别名，显示记忆里的名字/代号）'}</span>
+      </div>
+      ${g.last_bot_text ? `<div class="muted">它上次说：${esc(g.last_bot_text)}</div>` : ''}
+      ${renderFactsBox(g)}
+      ${(g.members || []).length ? `<details style="margin-top:8px"><summary class="muted">群成员 (${g.members.length})</summary>
+        <table style="margin-top:8px"><tbody>
+        ${g.members.map(m => `<tr>
+          <td>${esc(m.name || '(无名)')}</td>
+          <td class="muted" style="word-break:break-all">${esc(m.openid)}</td>
+          <td class="muted">${m.msg_count} 条</td>
+          <td class="muted">${esc(m.note || '')}</td>
+          <td>${m.is_master ? '<span style="color:var(--ok)">主人</span>' :
+            `<button class="ghost sm" onclick="bind('${escJ(m.openid)}','${escJ(m.name)}')">设为主人</button>`}</td>
+        </tr>`).join('')}
+        </tbody></table></details>` : ''}
+    </div>`;
+  }).join('') || '<div class="muted">还没有收到任何群消息。</div>';
+}
+
+/* ================= 在线时段 ================= */
+
+function renderSchedule(s) {
+  const sc = CFG?.schedule || {};
+  document.getElementById('sch-on').checked = !!sc.enabled;
+  document.getElementById('sch-mode').value = sc.mode || 'daytime';
+  document.getElementById('sch-grace').value = sc.at_grace_sec || 300;
+  document.getElementById('sch-base').value = sc.base_rate ?? 0.2;
+  const tb = document.getElementById('sch-windows').querySelector('tbody');
+  tb.innerHTML = (sc.windows || []).map((w, i) =>
+    `<tr>
+      <td><input value="${esc(w.from || '')}" placeholder="00:30" style="width:76px" data-sw="${i}" data-k="from"></td>
+      <td><input value="${esc(w.to || '')}" placeholder="08:30" style="width:76px" data-sw="${i}" data-k="to"></td>
+      <td><input type="number" step="0.05" min="0" max="1" value="${esc(w.rate ?? 0.2)}" style="width:70px" data-sw="${i}" data-k="rate"></td>
+      <td><input value="${esc(w.label || '')}" placeholder="说明" data-sw="${i}" data-k="label"></td>
+      <td><button class="ghost sm" onclick="delScheduleWindow(${i})">删</button></td>
+    </tr>`).join('');
+  if (s && s.schedule) {
+    const v = s.schedule;
+    const pct = Math.round((v.rate ?? 0) * 100);
+    document.getElementById('sch-now').textContent =
+      `当前：${esc(v.label || '—')}，在线率 ${pct}%` + (v.enabled ? '' : '（未启用，全部放行）');
+  }
+}
+function addScheduleWindow() {
+  UNSAVED = true;
+  CFG.schedule = CFG.schedule || {};
+  CFG.schedule.windows = CFG.schedule.windows || [];
+  CFG.schedule.windows.push({ from: '00:00', to: '08:00', rate: 0.5, label: '' });
+  renderSchedule();
+}
+function delScheduleWindow(i) {
+  UNSAVED = true;
+  CFG.schedule.windows.splice(i, 1); renderSchedule();
+}
+function collectSchedule() {
+  CFG.schedule = CFG.schedule || {};
+  CFG.schedule.enabled = document.getElementById('sch-on').checked;
+  CFG.schedule.mode = document.getElementById('sch-mode').value;
+  CFG.schedule.at_grace_sec = +document.getElementById('sch-grace').value || 300;
+  CFG.schedule.base_rate = parseFloat(document.getElementById('sch-base').value);
+  if (!(CFG.schedule.base_rate > 0)) CFG.schedule.base_rate = 0.2;
+  if (CFG.schedule.base_rate > 1) CFG.schedule.base_rate = 1;
+  const rows = document.getElementById('sch-windows').querySelectorAll('input[data-sw]');
+  const map = {};
+  rows.forEach(el => {
+    const i = +el.dataset.sw, k = el.dataset.k;
+    map[i] = map[i] || { from: '', to: '', rate: 0.2, label: '' };
+    if (k === 'rate') map[i][k] = parseFloat(el.value) || 0;
+    else map[i][k] = el.value;
+  });
+  CFG.schedule.windows = Object.keys(map).sort((a, b) => a - b).map(k => map[k]);
+}
+
+/* ================= 页签与启动 ================= */
+
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));
+  t.classList.add('on');
+  ['overview','endpoints','persona','memes','groups','logs'].forEach(p =>
+    document.getElementById('p-' + p).classList.toggle('hide', p !== t.dataset.p));
+  if (t.dataset.p === 'overview') { loadUsage(); loadRecent(); }
+  // 池子是会变的（优选在后台淘汰），切进这一页时重新拉一次，
+  // 不然看到的永远是上次轮询那一刻的快照
+  if (t.dataset.p === 'memes') loadMemes();
+  // 日志页自己轮询（不搭 /api/state 的便车），切进来时启一次
+  if (t.dataset.p === 'logs') initLogsPage();
+});
+
+document.getElementById('t-ep').onchange = fillModels;
+document.getElementById('logout').onclick = async () => { await api('/api/logout'); location.href = PREFIX + '/login.html'; };
+
+loadState();
+loadUsage();
+loadRecent();
+setInterval(loadState, 5000);
+setInterval(loadUsage, 30000); // 统计图 30 秒一刷就够，不给库添压力
+setInterval(loadRecent, 15000); // 明细表稍快一点，排查问题时不用干等
+</script>
+</body>
+</html>
