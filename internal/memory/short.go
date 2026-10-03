@@ -441,6 +441,20 @@ func (g *Group) Mute(d time.Duration) {
 	g.mu.Unlock()
 }
 
+// Unmute 立刻解除静默。
+//
+// 用 Mute(0) 也能达到同样效果（截止时间等于当下，engine 的
+// time.Now().Before(muted) 判false），但那依赖比较方向，改引擎就会静默失效。
+// 置零时间让状态只有一个：没有截止时间就是没静默。
+//
+// 注意 mutedUntil **不落盘**（persist.go 的快照里没有这个字段），
+// 进程一重启静默自动解除。这是原设计如此，这里不动它。
+func (g *Group) Unmute() {
+	g.mu.Lock()
+	g.mutedUntil = time.Time{}
+	g.mu.Unlock()
+}
+
 // Notes 返回注入的备注
 func (g *Group) Notes() []string {
 	g.mu.Lock()

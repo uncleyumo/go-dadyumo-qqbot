@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"dadyumo/internal/config"
 	"dadyumo/internal/llm"
@@ -683,4 +684,73 @@ func TestSessionCookieSecure(t *testing.T) {
 		}
 	}
 	t.Fatal("没有拿到会话 cookie")
+}
+
+// TestMuteZeroUnmutes 守住「取消静默」这条指令。
+//
+// 原来 body.Minutes 是 int，0 被当成「没给」→ 重新静默 30 分钟，
+// 于是界面上想取消反而取消不掉，只能等它自己到期。
+// 现在 Minutes 是指针：nil = 没给（默认 30），0 = 明确取消。
+func TestMuteZeroUnmutes(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	h := srv.Handler("/admin")
+	ck := authedCookie(t, srv)
+	const gid = "g-mute-1"
+
+	post := func(body string) map[string]any {
+		req := httptest.NewRequest(http.MethodPost, "/admin/api/mute", strings.NewReader(body))
+		req.AddCookie(ck)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST %s -> %d %s", body, rec.Code, rec.Body.String())
+		}
+		var j map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &j); err != nil {
+			t.Fatal(err)
+		}
+		return j
+	}
+
+	// 先静默，确认真的静默了
+	j := post(`{"openid":"` + gid + `","minutes":30}`)
+	if j["muted"] != true {
+		t.Fatalf("minutes=30 期望 muted=true，实际 %v", j["muted"])
+	}
+	until, _ := j["until"].(float64)
+	if until <= 0 {
+		t.Fatalf("minutes=30 期望返回非零 until，实际 %v", j["until"])
+	}
+	if got := srv.mem.Group(gid, "").MutedUntil(); !got.After(time.Now()) {
+		t.Fatalf("内存里没处于静默状态，mutedUntil=%v", got)
+	}
+
+	// minutes=0 必须取消，而不是又静默 30 分钟
+	j = post(`{"openid":"` + gid + `","minutes":0}`)
+	if j["muted"] != false {
+		t.Fatalf("minutes=0 期望 muted=false，实际 %v", j["muted"])
+	}
+	if got := srv.mem.Group(gid, "").MutedUntil(); !got.IsZero() {
+		t.Fatalf("取消后 mutedUntil 应为零值，实际 %v", got)
+	}
+
+	// 完全不传 minutes 走默认 30（这是指针方案要保住的老行为）
+	j = post(`{"openid":"` + gid + `"}`)
+	if j["muted"] != true {
+		t.Fatalf("不传 minutes 期望默认静默，muted=%v", j["muted"])
+	}
+}
+
+// TestMuteDeadlineHidesExpired 已过期的静默必须报 0，
+// 否则界面会算出「剩 -3 分钟」。
+func TestMuteDeadlineHidesExpired(t *testing.T) {
+	if got := muteDeadline(time.Now().Add(-time.Hour)); got != 0 {
+		t.Fatalf("已过期应返回 0，实际 %d", got)
+	}
+	if got := muteDeadline(time.Time{}); got != 0 {
+		t.Fatalf("零值应返回 0，实际 %d", got)
+	}
+	if got := muteDeadline(time.Now().Add(10 * time.Minute)); got <= 0 {
+		t.Fatalf("未过期应返回正的 Unix 秒，实际 %d", got)
+	}
 }

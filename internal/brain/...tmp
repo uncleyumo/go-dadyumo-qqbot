@@ -1,0 +1,126 @@
+{
+  "server": {
+    "public_addr": "0.0.0.0:8080",
+    "webhook_path": "/qq/callback",
+    "admin_addr": "127.0.0.1:8081",
+    "admin_enabled": true,
+    "admin_base_url": "/admin"
+  },
+  "qq": {
+    "app_id": "1905690675",
+    "app_secret": "test-secret",
+    "sandbox": false,
+    "require_signature": true,
+    "send_timeout_ms": 10000,
+    "prefer_passive": true,
+    "self_openid": ""
+  },
+  "admin": {
+    "username": "admin",
+    "password_bcrypt": "",
+    "password_plain": "",
+    "session_secret": ""
+  },
+  "llm": {
+    "endpoints": null,
+    "max_attempts": 4,
+    "weights": {
+      "ttft": 0.45,
+      "failure": 0.3,
+      "latency": 0.15,
+      "cooldown": 0.1
+    }
+  },
+  "persona": {
+    "name": "",
+    "background": "",
+    "style": "",
+    "roast_rules": null,
+    "red_lines": null,
+    "catchphrases": null,
+    "max_chars": 120,
+    "silence_rules": null,
+    "refuse_rules": null
+  },
+  "brain": {
+    "daily_budget": 300,
+    "max_history": 30,
+    "temperature": 0.95,
+    "max_out_tokens": 400,
+    "debounce_sec": 10,
+    "debounce_jitter_sec": 8,
+    "max_ctx_tokens": 4000,
+    "summary_every": 24,
+    "max_images_per_call": 3,
+    "max_facts": 24,
+    "image_max_side": 1024,
+    "video_max_sec": 120,
+    "video_max_mb": 50,
+    "video_frames": 2,
+    "video_frame_side": 768,
+    "weather_lat": 0,
+    "weather_lon": 0,
+    "weather_place": "",
+    "special_days": null
+  },
+  "master": {
+    "dev_enabled": false,
+    "nickname": "",
+    "qq": "",
+    "openids": [
+      "openid-new"
+    ],
+    "bind_token": "tok",
+    "bind_enabled": true
+  },
+  "speak": {
+    "max_segments": 5,
+    "min_delay_ms": 900,
+    "max_delay_ms": 2600,
+    "per_char_ms": 150,
+    "max_seg_chars": 40,
+    "first_delay_ms": 600,
+    "eager_scale": 0.5,
+    "tail_ramp": 0.18
+  },
+  "groups": null,
+  "storage": {
+    "data_dir": "./data"
+  },
+  "schedule": {
+    "enabled": true,
+    "mode": "daytime",
+    "at_grace_sec": 300,
+    "base_rate": 0.2,
+    "windows": null
+  },
+  "asr": {
+    "provider": "siliconflow",
+    "api_key": "",
+    "model": "FunAudioLLM/SenseVoiceSmall"
+  },
+  "compact": {
+    "base_url": "https://slb-v1.api.fan/v1",
+    "api_key": "",
+    "model": "qwen3.5-flash",
+    "threshold_chars": 300,
+    "target_chars": 150,
+    "max_out_tokens": 300
+  },
+  "meme_pool": {
+    "enabled": false,
+    "minio": {
+      "endpoint": "",
+      "region": "us-east-1",
+      "bucket": "",
+      "access_key": "",
+      "secret_key": "",
+      "state_file": "memes.json"
+    },
+    "max_pool": 20,
+    "max_residency_days": 30,
+    "opt_interval_hours": 6,
+    "max_tool_rounds": 3,
+    "max_images_per_reply": 1
+  }
+}

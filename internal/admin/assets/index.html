@@ -1448,6 +1448,13 @@ async function mute(openid) {
   const r = await api('/api/mute', {openid, minutes: 30});
   if (r && r.ok) { toast('已静默 30 分钟'); FORCE_REDRAW = true; loadState(); } else toast((r && r.msg) || '操作失败', true);
 }
+// cancelMute 立刻解除静默。minutes 必须是 0——服务端用指针区分
+// 「没传」（默认 30 分钟）和「传 0」（取消），发 undefined 会变成 30 分钟。
+async function cancelMute(openid) {
+  if (!confirm('立刻取消这个群的静默？')) return;
+  const r = await api('/api/mute', {openid, minutes: 0});
+  if (r && r.ok) { toast('已取消静默'); FORCE_REDRAW = true; loadState(); } else toast((r && r.msg) || '取消失败', true);
+}
 // 群别名：change 即存的轻量写，不走 rev 乐观锁
 async function saveAlias(openid, el) {
   const r = await api('/api/group/alias', {openid, name: el.value});
@@ -1547,13 +1554,22 @@ function renderGroups(s) {
   const list = (s && s.groups) || [];
   box.innerHTML = list.map(g => {
     const display = g.alias || g.name || g.openid;
+    // 静默中：把剩余时间算出来显示。页面每 5 秒自动 loadState 一次，
+    // 所以这里的倒计时自然会跟着走，不需要额外的 setInterval。
+    const leftSec = g.muted_until ? Math.max(0, g.muted_until - Math.floor(Date.now()/1000)) : 0;
+    const muted = leftSec > 0;
+    const leftTxt = leftSec >= 3600
+      ? `${Math.floor(leftSec/3600)} 小时 ${Math.ceil((leftSec%3600)/60)} 分`
+      : `${Math.max(1, Math.ceil(leftSec/60))} 分钟`;
     return `
     <div class="ep ${g.left ? 'off' : ''}">
       <div class="row">
-        <label>群</label><span>${esc(display)}${g.left ? '<span class="badge">已退群</span>' : ''}</span>
+        <label>群</label><span>${esc(display)}${g.left ? '<span class="badge">已退群</span>' : ''}${muted ? `<span class="badge" style="color:var(--warn)">静默中 · 剩 ${esc(leftTxt)}</span>` : ''}</span>
         <span class="muted">${esc(g.openid.slice(-8))} · 冷场 ${esc(g.idle)} · 上下文 ${g.recent} 条</span>
         <span style="margin-left:auto;display:flex;gap:6px">
-          <button class="ghost sm" onclick="mute('${escJ(g.openid)}')">静默30分钟</button>
+          ${muted
+            ? `<button class="ghost sm" onclick="cancelMute('${escJ(g.openid)}')">取消静默</button>`
+            : `<button class="ghost sm" onclick="mute('${escJ(g.openid)}')">静默30分钟</button>`}
           ${g.left ? `<button class="danger sm" onclick="removeGroup('${escJ(g.openid)}','${escJ(display)}')">移除</button>` : ''}
         </span>
       </div>

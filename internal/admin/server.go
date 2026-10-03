@@ -266,6 +266,7 @@ type groupView struct {
 	Left        bool              `json:"left"`  // 机器人已被移出该群（GROUP_DEL_ROBOT 事件标记）
 	Recent      int               `json:"recent"`
 	Idle        string            `json:"idle"`
+	MutedUntil  int64             `json:"muted_until"` // 静默截止时刻（Unix 秒），0 = 没在静默
 	LastBotText string            `json:"last_bot_text"`
 	FactsItems  []memory.FactItem `json:"facts_items"` // 结构化长期要点（可编辑），按最后写入时间倒序
 	FactsMax    int               `json:"facts_max"`   // 上限，前端显示「已用 n/上限」
@@ -357,6 +358,9 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 				Left:        left,
 				Recent:      len(g.Recent(0)),
 				Idle:        g.IdleFor().Truncate(time.Second).String(),
+				// 已经过期的静默一律报 0：前端只靠这个字段决定画不画「静默中」，
+				// 报一个过去的截止时间会让界面显示「剩 -3 分钟」。
+				MutedUntil:  muteDeadline(g.MutedUntil()),
 				LastBotText: g.LastText(),
 				FactsItems:  g.FactsList(),
 				FactsMax:    memory.MaxFacts,
@@ -437,11 +441,15 @@ func (s *Server) handleUnbindMaster(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleMute 让它在某个群闭嘴一段时间
+// handleMute 让它在某个群闭嘴一段时间，或者（minutes=0）立刻取消静默。
+//
+// minutes 用指针而不是 int，是为了区分「没传这个字段」和「传了 0」：
+// 前者沿用 30 分钟默认，后者是取消静默的明确指令。以前这里是 int，
+// 0 会被当成「没给」而重新静默 30 分钟——想取消反而取消不掉。
 func (s *Server) handleMute(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		OpenID  string `json:"openid"`
-		Minutes int    `json:"minutes"`
+		Minutes *int   `json:"minutes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.OpenID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "msg": "缺少 openid"})
@@ -451,12 +459,22 @@ func (s *Server) handleMute(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "msg": "记忆未初始化"})
 		return
 	}
-	if body.Minutes <= 0 {
-		body.Minutes = 30
+	g := s.mem.Group(body.OpenID, "")
+	// 没传 minutes 才用默认；传了就按传的来，0 = 取消静默。
+	if body.Minutes == nil || *body.Minutes < 0 {
+		def := 30
+		body.Minutes = &def
 	}
-	s.mem.Group(body.OpenID, "").Mute(time.Duration(body.Minutes) * time.Minute)
-	logx.Info("管理端已设置静默", "group", body.OpenID, "分钟", body.Minutes)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	if *body.Minutes == 0 {
+		g.Unmute()
+		logx.Info("管理端已取消静默", "group", body.OpenID)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "muted": false, "until": 0})
+		return
+	}
+	g.Mute(time.Duration(*body.Minutes) * time.Minute)
+	until := g.MutedUntil()
+	logx.Info("管理端已设置静默", "group", body.OpenID, "分钟", *body.Minutes)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "muted": true, "until": until.Unix()})
 }
 
 func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
@@ -1026,6 +1044,14 @@ func (s *Server) handleGroupFactDelete(w http.ResponseWriter, r *http.Request) {
 	s.persistMemory()
 	logx.Info("管理端删除群长期要点", "group", body.OpenID, "key", body.Key)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// muteDeadline 把静默截止时刻转成 Unix 秒，已过期返回 0。
+func muteDeadline(until time.Time) int64 {
+	if !until.After(time.Now()) {
+		return 0
+	}
+	return until.Unix()
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
