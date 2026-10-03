@@ -268,6 +268,15 @@ type groupView struct {
 	Idle        string            `json:"idle"`
 	MutedUntil  int64             `json:"muted_until"` // 静默截止时刻（Unix 秒），0 = 没在静默
 	LastBotText string            `json:"last_bot_text"`
+	// Summary 是「前文提要」：模型压缩出来、已被 recent 窗口裁掉的那段历史。
+	// prompt.go 每轮都注入 user prompt，是模型知道「聊到哪了」的唯一来源——
+	// 也就是**最影响说话、却曾经完全不可见**的一块记忆。
+	// 控制台只能看不能改：它是模型生成的，改了下一次压缩又会被覆盖回去，
+	// 想真正清掉它只能用「清空全部记忆」。
+	Summary string `json:"summary"`
+	// TotalLines 是历史累计条数。Recent 会被裁，所以 Recent 变小不代表
+	// 聊天记录变少——两个一起显示才看得出「窗口里剩多少 / 一共聊过多少」。
+	TotalLines int `json:"total_lines"`
 	FactsItems  []memory.FactItem `json:"facts_items"` // 结构化长期要点（可编辑），按最后写入时间倒序
 	FactsMax    int               `json:"facts_max"`   // 上限，前端显示「已用 n/上限」
 	Members     []memory.Member   `json:"members"`
@@ -362,6 +371,8 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 				// 报一个过去的截止时间会让界面显示「剩 -3 分钟」。
 				MutedUntil:  muteDeadline(g.MutedUntil()),
 				LastBotText: g.LastText(),
+				Summary:     g.Summary(),
+				TotalLines:  g.TotalLines(),
 				FactsItems:  g.FactsList(),
 				FactsMax:    memory.MaxFacts,
 				Members:     members,

@@ -1565,7 +1565,7 @@ function renderGroups(s) {
     <div class="ep ${g.left ? 'off' : ''}">
       <div class="row">
         <label>群</label><span>${esc(display)}${g.left ? '<span class="badge">已退群</span>' : ''}${muted ? `<span class="badge" style="color:var(--warn)">静默中 · 剩 ${esc(leftTxt)}</span>` : ''}</span>
-        <span class="muted">${esc(g.openid.slice(-8))} · 冷场 ${esc(g.idle)} · 上下文 ${g.recent} 条</span>
+        <span class="muted">${esc(g.openid.slice(-8))} · 冷场 ${esc(g.idle)} · 窗口 ${g.recent} 条${g.total_lines ? ` / 累计 ${g.total_lines} 条` : ''}</span>
         <span style="margin-left:auto;display:flex;gap:6px">
           ${muted
             ? `<button class="ghost sm" onclick="cancelMute('${escJ(g.openid)}')">取消静默</button>`
@@ -1581,13 +1581,16 @@ function renderGroups(s) {
         <span class="muted">当前显示名：${esc(display)}${g.alias ? '' : '（未设别名，显示记忆里的名字/代号）'}</span>
       </div>
       ${g.last_bot_text ? `<div class="muted">它上次说：${esc(g.last_bot_text)}</div>` : ''}
+      ${g.summary ? `<details style="margin-top:8px"><summary class="muted">前文提要（${[...g.summary].length} 字 · 模型压缩的，删不掉，只能整体清记忆）</summary>
+        <div class="muted" style="margin-top:6px;white-space:pre-wrap">${esc(g.summary)}</div></details>` : ''}
       ${renderFactsBox(g)}
       ${(g.members || []).length ? `<details style="margin-top:8px"><summary class="muted">群成员 (${g.members.length})</summary>
         <table style="margin-top:8px"><tbody>
         ${g.members.map(m => `<tr>
-          <td>${esc(m.name || '(无名)')}</td>
+          <td>${esc(m.name || '(无名)')}${m.card && m.card !== m.name ? `<div class="muted">名片：${esc(m.card)}</div>` : ''}</td>
           <td class="muted" style="word-break:break-all">${esc(m.openid)}</td>
           <td class="muted">${m.msg_count} 条</td>
+          <td class="muted">${m.last_seen ? '最后活跃 ' + esc(fmtClock(m.last_seen)) : ''}</td>
           <td class="muted">${esc(m.note || '')}</td>
           <td>${m.is_master ? '<span style="color:var(--ok)">开发者</span>' :
             `<button class="ghost sm" onclick="bind('${escJ(m.openid)}','${escJ(m.name)}')">设为开发者</button>`}</td>

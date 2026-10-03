@@ -307,6 +307,14 @@ func (g *Group) SetSummary(s string) {
 	g.summaryUntil = g.totalLines
 }
 
+// TotalLines 返回历史累计条数（recent 窗口会被裁，所以它跟 len(Recent) 不是一回事）。
+// 给管理端显示「窗口里剩多少 / 一共聊过多少」用。
+func (g *Group) TotalLines() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.totalLines
+}
+
 // PendingSummary 返回自上次摘要以来新增了多少条
 func (g *Group) PendingSummary() int {
 	g.mu.Lock()

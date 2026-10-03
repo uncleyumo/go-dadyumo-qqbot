@@ -754,3 +754,55 @@ func TestMuteDeadlineHidesExpired(t *testing.T) {
 		t.Fatalf("未过期应返回正的 Unix 秒，实际 %d", got)
 	}
 }
+
+// TestStateExposesSummaryAndTotalLines 前文提要必须在 /api/state 里可见。
+//
+// 它每轮都被 prompt.go 注入 user prompt，是模型知道「聊到哪了」的唯一来源，
+// 但它以前完全没进 groupView——控制台一个字都不显示，也无法查证。
+// 这个测试盯住它在状态接口里，防止哪天又被当成内部字段省掉。
+func TestStateExposesSummaryAndTotalLines(t *testing.T) {
+	srv, _ := newTestServer(t, nil)
+	const gid = "g-sum-1"
+	g := srv.mem.Group(gid, "摘要测试群")
+	for i := 0; i < 5; i++ {
+		g.Append(memory.Line{Role: "user", Name: "甲", OpenID: "o-1", Content: fmt.Sprintf("第%d句", i)}, 10)
+	}
+	g.SetSummary("他们之前在聊一个梗。")
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/state", nil)
+	req.AddCookie(authedCookie(t, srv))
+	rec := httptest.NewRecorder()
+	srv.Handler("/admin").ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("state -> %d %s", rec.Code, rec.Body.String())
+	}
+	var st struct {
+		Groups []struct {
+			OpenID     string `json:"openid"`
+			Summary    string `json:"summary"`
+			TotalLines int    `json:"total_lines"`
+		} `json:"groups"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	var got *struct {
+		OpenID     string `json:"openid"`
+		Summary    string `json:"summary"`
+		TotalLines int    `json:"total_lines"`
+	}
+	for i := range st.Groups {
+		if st.Groups[i].OpenID == gid {
+			got = &st.Groups[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("state 里找不到群 %s", gid)
+	}
+	if got.Summary != "他们之前在聊一个梗。" {
+		t.Errorf("summary = %q，期望原样下发", got.Summary)
+	}
+	if got.TotalLines != 5 {
+		t.Errorf("total_lines = %d，期望 5", got.TotalLines)
+	}
+}
