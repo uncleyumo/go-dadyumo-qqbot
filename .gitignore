@@ -14,6 +14,12 @@
 # 语料与分析文档（含群聊记录与成员 openid，不入库）
 /docs/
 
+# config.Store 的原子落盘临时文件。当 Store 的路径为空串时，
+# filepath.Base("") 返回 "."，config.go:885 就会拼出一个真名叫「...tmp」的文件，
+# 而且每跑一次 go test ./internal/brain/ 就重新生成一个（测试里建了空路径的 Store）。
+# 那是 config.go 的 bug，临时用 ignore 挡住，别让它进版本库。
+...tmp
+
 # 本地 AI 工具配置：含真实 API Key，绝不入库
 /.claude/
 /.workbuddy/

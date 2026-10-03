@@ -38,7 +38,7 @@ go-dadyumo-qqbot/
 ├── deploy/                      systemd 单元、Caddy 反代示例
 ├── scripts/                     编译与部署脚本
 ├── personas/                    两版人设存档（v1 嘴臭的老东西 / v2 靠得住的人）+ 切换说明
-├── docs/design/                 设计文档（含人设 v2 的完整取舍记录）
+├── docs/                        设计文档（含群聊记录与 openid，不入库）
 ├── config.json.example          配置模板（含完整人设）
 └── config.json                  真实配置（已在 .gitignore 中，绝不入库）
 ```
