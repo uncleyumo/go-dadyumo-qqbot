@@ -23,6 +23,9 @@ const (
 func ParseDecision(raw string) (*Decision, ParseIssue) {
 	text := strings.TrimSpace(raw)
 	if text == "" {
+		// 整串为空时 os 必为空（extractTag 在空串上返回 ""），所以这里**不带** os
+		// 不是漏的——加了也是死代码，还会让人误以为这条也能捞到 os。
+		// （下面剥完标签什么都不剩那条出口才需要带，两者情况不同。）
 		return &Decision{Act: "quiet"}, ParseFallback
 	}
 
@@ -58,12 +61,21 @@ func ParseDecision(raw string) (*Decision, ParseIssue) {
 
 	// 拿不到合法 JSON：把原文当成它想说的话，但必须先剥掉标签和围栏
 	plain := strings.TrimSpace(stripTags(text))
+	// 剥完什么都不剩：模型只吐了 <os> 就被 max_tokens 截断，
+	// 或者 JSON 坏到括号都配不出来（典型是引号没闭合）。
+	//
+	// **os 必须带上**。这恰恰是最需要诊断的场景：模型确实写了内心活动，
+	// 只是没给出可解析的 JSON。engine.go 把 os 当作区分「懒得理他」和
+	// 「怕说错」的唯一手段，扔掉它等于让「它为什么闭嘴」彻底无从查起。
+	//
+	// 2026-10-03 之前这里漏了 OS: os，而紧邻的下面两条出口都带着——
+	// 同一函数内写法不一致，看起来像「这条特意不要 os」，实际是漏的。
 	if plain == "" {
-		return &Decision{Act: "quiet"}, ParseFallback
+		return &Decision{Act: "quiet", OS: os}, ParseFallback
 	}
 	// 剥干净之后还得像句人话。免费小模型的畸形输出剥完标签剩下的常常
 	// 还是协议碎片（<json>{"text": 、 {"act":"say"} 这种），
-	// 当发言发出去就是刷屏，宁可闭嘴——engine.go 只在 fallback+say 时告警，
+	// 当发言发出去就是刷屏，宁可闭嘴——engine.go 对降级路径一律告警，
 	// 这里返回 quiet 并带上 ParseNoise，debug 日志里能看出是被这道闸拦下的。
 	if !looksLikeSpeech(plain) {
 		return &Decision{Act: "quiet", OS: os}, ParseNoise
@@ -301,7 +313,7 @@ func extractJSON(s string) (string, ParseIssue) {
 //
 // 这里刻意不碰引号。模型爱写 {"text":"他说“没事”"}，而全角引号在 JSON 里
 // 本来就是合法的普通字符——无条件替换成 ASCII " 会把字符串提前闭合，
-// 整条决策解析失败后被静默丢掉（引擎只在 fallback+say 时告警，压根不响）。
+// 整条决策解析失败后被降级丢掉（引擎对降级路径一律告警，不会静默）。
 // 引号留给 normalizeQuotes 在解析失败之后做。
 func cleanFence(s string) string {
 	s = strings.TrimSpace(s)

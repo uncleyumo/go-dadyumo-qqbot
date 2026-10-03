@@ -195,17 +195,27 @@ func TestFixedPartIsByteStable(t *testing.T) {
 
 	// fixedOf 截到**第一个**动态段为止。
 	//
-	// 分界不能选「现在时间：」：情绪段【现在的情况】排在它前面，而 mood 是每轮
-	// 变的（危机/低落/无），用环境行当边界会把动态内容算进固定段，
-	// 这个测试就会永远失败——它自己就成了假警报。
-	// 「【现在的情况】」才是动态区的真正起点。
+	// 边界不能钉死在某一个标记上，只能取「最早出现的那个动态标记」：
+	// 动态段里的几块是条件写入的——【相关的人】只在有 masterHint 时写，
+	// 【这轮你要回的是】只在有触发者时写，【你现在的状态】才无条件。
+	// 钉死一个，两个用例就会因为「谁的标记靠前」而截出不同长度，
+	// 测试自己变成假警报（这正是旧版用情绪段当边界的原因：它无条件且最靠前）。
+	//
+	// 2026-10-04 人设 v2 删掉了按情绪分档的三支，【现在的情况】这个
+	// 无条件且最靠前的标记没了，于是改成取四个标记里最早出现的那个。
+	// 用例里的 mood 现在不再影响提示词，但保留着：它们仍走同一条调用路径，
+	// 能守住「以后谁再往固定段里加情绪相关内容」这个回归。
 	fixedOf := func(s string) string {
-		for _, marker := range []string{"【现在的情况】", "现在时间："} {
-			if i := strings.Index(s, marker); i >= 0 {
-				return s[:i]
+		at := -1
+		for _, marker := range []string{"【相关的人】", "【这轮你要回的是】", "【你现在的状态】", "现在时间："} {
+			if i := strings.Index(s, marker); i >= 0 && (at < 0 || i < at) {
+				at = i
 			}
 		}
-		return s
+		if at < 0 {
+			return s
+		}
+		return s[:at]
 	}
 
 	first := fixedOf(systemPrompt(base, cases[0].g, cases[0].mood, cases[0].hint, cases[0].env, cases[0].who))

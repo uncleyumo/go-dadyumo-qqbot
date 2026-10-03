@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +46,10 @@ type Server struct {
 	// 管理端改完记忆立即调用它，用户才不会遇到「改完重启就没了」。
 	// 为 nil 时静默跳过（依赖 5 分钟周期 flush 兜底）。
 	memPersist func() error
+	// memPath 长期记忆文件路径，由 main 注入。
+	// 只有 handleMemoryClear 用得上：清记忆前要把原文件挪走备份，
+	// 而 memPersist 只是个闭包，拿不到路径。
+	memPath string
 }
 
 // New 创建管理端
@@ -65,6 +70,9 @@ func New(store *config.Store, router *llm.Router, engine *brain.Engine, mem *mem
 
 // SetMemoryPersist 注入长期记忆的即时落盘回调（main 里传 mem.SaveTo(memPath)）
 func (s *Server) SetMemoryPersist(fn func() error) { s.memPersist = fn }
+
+// SetMemoryPath 注入长期记忆文件路径，供清记忆前备份原文件用。
+func (s *Server) SetMemoryPath(p string) { s.memPath = p }
 
 // SetMemePool 挂上表情包池并注入其落盘回调。池为 nil 时管理端显示「未启用」。
 func (s *Server) SetMemePool(p *memepool.Pool, persist func() error) {
@@ -113,6 +121,7 @@ func (s *Server) Handler(prefix string) http.Handler {
 	mux.HandleFunc(prefix+"/api/logs", s.auth(s.handleLogs))
 	mux.HandleFunc(prefix+"/api/group/alias", s.auth(s.handleGroupAlias))
 	mux.HandleFunc(prefix+"/api/group/remove", s.auth(s.handleGroupRemove))
+	mux.HandleFunc(prefix+"/api/memory/clear", s.auth(s.handleMemoryClear))
 	mux.HandleFunc(prefix+"/api/group/fact/set", s.auth(s.handleGroupFactSet))
 	mux.HandleFunc(prefix+"/api/group/fact/delete", s.auth(s.handleGroupFactDelete))
 	mux.HandleFunc(prefix+"/api/memes", s.auth(s.handleMemeList))
@@ -263,11 +272,14 @@ type groupView struct {
 	Members     []memory.Member   `json:"members"`
 }
 
-// masterView 主人绑定情况
+// masterView 开发者绑定与特权情况
 type masterView struct {
 	Nickname string   `json:"nickname"`
 	QQ       string   `json:"qq"`
 	OpenIDs  []string `json:"openids"`
+	// DevEnabled 开发者特权开关。关着时（默认）开发者的消息与群友完全一样，
+	// 绑定列表照常维护——认人与特权是两件事。
+	DevEnabled bool `json:"dev_enabled"`
 }
 
 // logEntry 是 /api/state 里带的内存日志条目。
@@ -370,7 +382,12 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		QQ:      qqStatus{Sandbox: cfg.QQ.Sandbox, AppID: cfg.QQ.AppID},
 		Usage:   usage,
 		Groups:  groups,
-		Master:  masterView{Nickname: cfg.Master.Nickname, QQ: cfg.Master.QQ, OpenIDs: cfg.Master.OpenIDs},
+		Master: masterView{
+			Nickname:   cfg.Master.Nickname,
+			QQ:         cfg.Master.QQ,
+			OpenIDs:    cfg.Master.OpenIDs,
+			DevEnabled: cfg.Master.DevEnabled,
+		},
 		Schedule: func() scheduleView {
 			rate, label := brain.OnlineRate(cfg.Schedule, time.Now())
 			return scheduleView{
@@ -384,7 +401,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleBindMaster 手动把某个 openid 绑成主人。
+// handleBindMaster 手动把某个 openid 绑成开发者。
 // 群里回调只给 openid，认人只能靠这个列表。
 func (s *Server) handleBindMaster(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -400,7 +417,7 @@ func (s *Server) handleBindMaster(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "msg": err.Error()})
 		return
 	}
-	logx.Info("管理端绑定主人", "openid", body.OpenID, "name", body.Name)
+	logx.Info("管理端绑定开发者", "openid", body.OpenID, "name", body.Name)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "added": added})
 }
 
@@ -523,7 +540,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 				incoming.LLM.Endpoints[i].BaseURL = c.LLM.Endpoints[i].BaseURL
 			}
 		}
-		// 主人绑定列表漏传时保留原值：把自己解绑了就再也认不回来了
+		// 开发者绑定列表漏传时保留原值：把自己解绑了就再也认不回来了
 		if len(incoming.Master.OpenIDs) == 0 {
 			incoming.Master.OpenIDs = c.Master.OpenIDs
 		}
@@ -911,8 +928,53 @@ func (s *Server) handleGroupRemove(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleGroupFactSet 新增或修改一条群长期要点。
+// handleMemoryClear 清空全部群的记忆，用于切人设。
+//
+// 只切人设不重置记忆会出事：记忆里的事实、成员画像、摘要是按**旧人设**的
+// 判断流程攒下来的，新人设读到它们只会把已经废掉的行为学回来。
+//
+// 顺序是「备份 → 移走原文件 → Clear → 写回空快照」，不是简单的 Clear +
+// SaveTo。原因是 memory.SaveTo 里的 guardAgainstEmptyOverwrite：磁盘上
+// 有群、快照 0 群时它会拒绝覆盖（那个守卫存在的目的正是拦住空覆盖），
+// 于是清完内存、写盘被拒，进程一重启记忆原样回来——按钮看着成功了，
+// 其实没生效。移走原文件之后守卫读不到文件，放行，写的还是空快照。
+//
+// 备份不是可选项：这一下是不可逆的，没备份就没有回头路。
+func (s *Server) handleMemoryClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "msg": "method not allowed"})
+		return
+	}
+	if s.mem == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "msg": "记忆未初始化"})
+		return
+	}
+	backup := ""
+	if s.memPath != "" {
+		if _, err := os.Stat(s.memPath); err == nil {
+			backup = s.memPath + ".bak-" + time.Now().Format("20060102-150405")
+			if err := os.Rename(s.memPath, backup); err != nil {
+				// 挪不走就整个不继续。宁可让按钮报错，也不能出现
+				// 「内存清了、文件还在」的半吊子状态。
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "msg": "备份原记忆文件失败，已放弃清空：" + err.Error()})
+				return
+			}
+		}
+	}
+	n := s.mem.Clear()
+	// 这里不走 persistMemory()：它失败只告警，而这次失败必须让用户看见。
+	if s.memPersist != nil {
+		if err := s.memPersist(); err != nil {
+			logx.Error("清空记忆后写盘失败", "err", err.Error())
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "msg": "清空已生效但写盘失败，重启会变回来：" + err.Error()})
+			return
+		}
+	}
+	logx.Info("管理端已清空全部记忆", "groups", n, "backup", backup)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "groups": n, "backup": backup})
+}
 // 满了会按「最久没被写过」淘汰一条，被淘汰的 key 通过 evicted 返回，界面好提示。
+// handleGroupFactSet 新增或修改一条群长期要点。
 func (s *Server) handleGroupFactSet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "msg": "method not allowed"})

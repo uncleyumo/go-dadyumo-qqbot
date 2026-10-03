@@ -47,7 +47,7 @@ func TestHandleLogsFilters(t *testing.T) {
 	d := openTestStats(t)
 	base := time.Now().Add(-2 * time.Hour)
 	for i, e := range []statsdb.Event{
-		{Cat: "decision", Level: "INFO", Msg: "跳过：冲动值不足", Group: "群A"},
+		{Cat: "decision", Level: "INFO", Msg: "跳过：本次摇骰子没上线", Group: "群A"},
 		{Cat: "decision", Level: "WARN", Msg: "跳过：预算用尽", Group: "群A"},
 		{Cat: "speak", Level: "INFO", Msg: "已发言 你看看你", Group: "群B"},
 	} {
@@ -67,7 +67,7 @@ func TestHandleLogsFilters(t *testing.T) {
 		{"按分类", "?cat=decision", 2},
 		{"多分类", "?cat=decision,speak", 3},
 		{"按级别", "?level=WARN", 1},
-		{"关键字", "?q=冲动", 1},
+		{"关键字", "?q=摇骰子", 1},
 		// range 必须真的翻译成时间窗而不是被忽略：
 		// 数据全在 2 小时前，最近 1 小时应该一条都没有
 		{"时间窗内", "?range=60m", 0},

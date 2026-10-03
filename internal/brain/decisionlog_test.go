@@ -67,18 +67,23 @@ func newGateEngine(t *testing.T, tune func(*config.Config)) *Engine {
 		// 漏了会 panic（assignment to entry in nil map）。
 		// toolloop_test.go 里的 newTestEngine 没给，因为那些用例不碰 stateOf。
 		states: map[string]*groupState{},
+		// sender 也必须给：认主口令那种路径会调 replyOne → e.sender.SendGroupTo，
+		// 缺了会 nil panic。以前没暴露是因为没有用例走到那里。
+		sender: &recordingSender{},
 	}
 }
 
 // fireGates 往一个群里灌一批消息状态，然后跑一轮 fire。
-// impulse/reasons 直接写进 groupState，绕过消息解析——
-// 这里要测的是闸门，不是冲动值怎么算出来的。
-func fireGates(e *Engine, groupID string, impulse float64, reasons []string, n int) {
+// 只写状态字段，绕过消息解析——这里要测的是闸门，不是 trigger 怎么拼的
+// （trigger 的措辞由 trigger_test.go 管）。
+//
+// 注意这里不再写 impulse/reasons：冲动值机制已于 2026-10-03 废除，
+// 那两个字段连同它们服务的两道闸（冲动值门限、刷屏硬闸）一起没了。
+// 剩下的闸由这里逐个测。
+func fireGates(e *Engine, groupID string, n int) {
 	s := e.stateOf(groupID)
 	s.mu.Lock()
 	s.newCount = n
-	s.impulse = impulse
-	s.reasons = reasons
 	s.mu.Unlock()
 	e.fire(groupID)
 }
@@ -86,83 +91,73 @@ func fireGates(e *Engine, groupID string, impulse float64, reasons []string, n i
 // TestDecisionLogsAreVisible 决策链路的每一条都必须分类为 decision 且级别可见。
 //
 // 这是本次改动的全部主张：用户点开日志就能知道它为什么不回。
+//
+// 2026-10-03：闸门从六道减到四道，这里用「静默期」当样本——
+// 它是剩下四道里最容易被手动触发的（群卡片点一下就有）。
 func TestDecisionLogsAreVisible(t *testing.T) {
-	e := newGateEngine(t, func(c *config.Config) {
-		c.Brain.ImpulseThreshold = 0.9 // 抬高，让这批必然过不了
-	})
-	e.mem.Group("g1", "测试群")
-	fireGates(e, "g1", 0.10, []string{"群里有闲聊"}, 1)
+	e := newGateEngine(t, nil)
+	g := e.mem.Group("g1", "测试群")
+	g.Mute(30 * time.Minute)
+	fireGates(e, "g1", 1)
 
-	entry := findDecision(t, "冲动值")
+	entry := findDecision(t, "静默")
 	if entry.Level == "DEBUG" {
 		t.Errorf("决策日志是 DEBUG 级，生产默认 Info 看不见——"+
 			"这正是「群里毛也不回却查不出原因」的成因，got: %s", entry.Level)
 	}
 }
 
-// TestImpulseGateLogsFullParams 冲动值闸必须带齐能判断的参数。
-func TestImpulseGateLogsFullParams(t *testing.T) {
-	e := newGateEngine(t, func(c *config.Config) {
-		c.Brain.ImpulseThreshold = 0.9
-	})
-	e.mem.Group("g1", "测试群")
-	fireGates(e, "g1", 0.25, []string{"群里有闲聊", "攒了一批新消息"}, 3)
+// TestMuteGateLogsFullParams 静默期闸必须带齐能判断的参数。
+//
+// 静默期是唯一纯手动触发的闸（「静默 30 分钟」按钮），所以日志得让人
+// 一眼看出「还剩多久」——不然用户只会以为机器人坏了。
+func TestMuteGateLogsFullParams(t *testing.T) {
+	e := newGateEngine(t, nil)
+	g := e.mem.Group("g1", "测试群")
+	g.Mute(30 * time.Minute)
+	fireGates(e, "g1", 1)
 
-	entry := findDecision(t, "冲动值")
-	for _, k := range []string{"冲动", "阈值", "差", "构成"} {
+	entry := findDecision(t, "静默")
+	for _, k := range []string{"静默至", "剩余"} {
 		if _, ok := entry.KV[k]; !ok {
-			t.Errorf("冲动值闸的日志缺 %q 这项参数：只有结论没有数字，等于没法判断"+
-				"「差多少」「为什么是这个分」。got: %v", k, entry.KV)
+			t.Errorf("静默期闸的日志缺 %q：用户点了静默却不知道要等多久，got: %v", k, entry.KV)
 		}
 	}
-	if v, _ := entry.KV["差"].(string); v == "" {
-		t.Error("「差」这一项是空的")
+	if v, _ := entry.KV["剩余"].(string); v == "" {
+		t.Error("「剩余」这一项是空的")
 	}
 }
 
-// TestScheduleGateLogsRollAndRate 在线率闸必须带摇到的值和当时的阈值。
+// TestScheduleDecideReportsRollAndRate 在线率判定必须把摇到的数和阈值带出来。
 //
 // 这一条最容易做漏：ScheduleAllow 过去只返回布尔，
 // 「本次摇到 0.73，阈值 0.85」这个信息压根没往外传过。
 // 结果就是日志里只有一句「当前时段不在线」——
 // 同样的配置同样的时间下次可能就中了，永远复现不了。
-// TestScheduleGateLogsRollAndRate 在线率判定必须把摇到的数和阈值带出来。
 //
-// **不经过 fire()**：那里是概率判定，再小的 base_rate 也有极小概率摇中，
-// 一旦摇中就会穿透所有闸门走到 decide()——而这个测试 Engine 没配 router，
-// 直接 nil 解引用。第一版就是这么崩的（而且天然 flaky）。
-//
-// 所以拆成两半：
-//   - 这里直接测 ScheduleDecide 的输出（确定性的，覆盖拒绝分支）
-//   - fire 里那行日志的字段，由下面 TestScheduleGateLogFields 单独验
+// **2026-10-03 起可以完全确定性了**：ScheduleDecide 增加了 roll 入参，
+// 不再自己调全局 math/rand。以前这里要循环 200 次等它摇中极小在线率，
+// 现在直接传一个固定的 roll 就能精确覆盖拒绝分支，且天然不 flaky。
+// 也不必再绕开 fire()——它当年绕开是因为概率不可控，现在可控了。
 func TestScheduleDecideReportsRollAndRate(t *testing.T) {
-	// base_rate=0 → OnlineRate 返回 0 → roll<0 恒为假 → 必然拒绝，且**不 flaky**
+	// base_rate=0.0001 → OnlineRate 返回 0.0001，传 roll=0.9 必然拒绝
 	s := config.ScheduleConfig{Enabled: true, Mode: "always", BaseRate: 0.0001}
-	s.BaseRate = 0.0001
 
-	var sawReject bool
-	for i := 0; i < 200; i++ {
-		d := ScheduleDecide(s, time.Now(), false, false, time.Hour)
-		if d.Allowed {
-			continue
-		}
-		sawReject = true
-		if d.Roll <= 0 || d.Roll >= 1 {
-			t.Fatalf("摇到的值 %v 不在 [0,1)", d.Roll)
-		}
-		if d.Rate <= 0 {
-			t.Fatalf("在线率 %v 应为极小正数", d.Rate)
-		}
-		if d.Roll < d.Rate {
-			t.Fatalf("拒绝却摇到 %.3f < 阈值 %.3f，自相矛盾", d.Roll, d.Rate)
-		}
-		if d.Label == "" {
-			t.Fatal("拒绝时必须带上命中的档位")
-		}
-		break
+	d := ScheduleDecide(s, time.Now(), false, false, time.Hour, 0.9)
+	if d.Allowed {
+		t.Fatal("roll 0.9 远大于在线率 0.0001，必须拒绝")
 	}
-	if !sawReject {
-		t.Fatal("200 次都没摇中极小在线率，测试环境异常")
+	if d.Roll != 0.9 {
+		t.Fatalf("回传摇到的值 %v，期望原样返回 0.9——日志里「摇到」必须就是参与比较的那个数", d.Roll)
+	}
+	if d.Rate <= 0 {
+		t.Fatalf("在线率 %v 应为极小正数", d.Rate)
+	}
+	if d.Roll < d.Rate {
+		t.Fatalf("拒绝却摇到 %.3f < 阈值 %.3f，自相矛盾", d.Roll, d.Rate)
+	}
+	if d.Label == "" {
+		t.Fatal("拒绝时必须带上命中的档位")
 	}
 }
 
@@ -198,7 +193,7 @@ func TestScheduleGateLogsInSource(t *testing.T) {
 // TestScheduleDecideReportsAllFields 非拒绝路径的字段也要齐（档位/原因）。
 func TestScheduleDecideReportsAllFields(t *testing.T) {
 	s := config.ScheduleConfig{Enabled: true, Mode: "daytime", BaseRate: 0.2}
-	d := ScheduleDecide(s, time.Now(), false, false, time.Hour)
+	d := ScheduleDecide(s, time.Now(), false, false, time.Hour, 0.1) // 0.1 < 0.2 → 放行
 	if d.Why == "" {
 		t.Error("ScheduleDecide 必须说明结果原因，否则日志里只有结论没法判断")
 	}
@@ -233,26 +228,6 @@ func TestScheduleAllowWrapsDecide(t *testing.T) {
 	}
 }
 
-// TestSilenceAndIntervalGatesAreVisible 静默期与最小间隔闸也要可见且带参数。
-func TestSilenceAndIntervalGatesAreVisible(t *testing.T) {
-	e := newGateEngine(t, func(c *config.Config) {
-		c.Brain.ImpulseThreshold = 0.1
-		c.Brain.MinSpeakIntervalSec = 600 // 刚发过言 → 必然被拦
-		// 在线率设 100%：即使最小间隔这闸没拦住，也不会掉进后面的模型调用
-		// （那需要 router，而这个 Engine 没配）。
-		c.Schedule.Enabled = false
-	})
-	e.mem.Group("g1", "测试群").MarkBotSpoke("刚说过")
-	fireGates(e, "g1", 0.9, []string{"被叫名字"}, 1)
-
-	entry := findDecision(t, "距上次发言")
-	for _, k := range []string{"距上次", "要求", "还差"} {
-		if _, ok := entry.KV[k]; !ok {
-			t.Errorf("最小间隔闸缺 %q：光说「太近」不知道要等多久、还差多少。got: %v",
-				k, entry.KV)
-		}
-	}
-}
 
 // TestQuietRoundLogsExactlyOnce 一次模型调用必须在日志里留下**恰好一条**决策。
 //
@@ -271,8 +246,7 @@ func TestQuietRoundLogsExactlyOnce(t *testing.T) {
 
 	before := countDecisions()
 	e.decide(e.store.Get(), g, "有人@了别人", "openid-x", "Pytorch搬运工",
-		false, false, []string{"主人说话", "群里有闲聊"}, 0.75,
-		nil, "", "", "", "", nil, "", false)
+		false, false, nil, "", "", "", "", nil, "", false)
 
 	if n := countDecisions() - before; n != 1 {
 		var msgs []string
@@ -295,10 +269,7 @@ func TestQuietRoundLogsExactlyOnce(t *testing.T) {
 	if os, _ := entry.KV["os"].(string); os != "人家嘲别人去了" {
 		t.Errorf("os 没带过来: %v", entry.KV["os"])
 	}
-	if r, _ := entry.KV["理由"].(string); r != "主人说话+群里有闲聊" {
-		t.Errorf("理由不对，看不出这 0.75 分是怎么攒出来的: %v", entry.KV["理由"])
-	}
-	for _, k := range []string{"冲动", "model", "结果", "耗时ms", "解析", "轮数"} {
+	for _, k := range []string{"model", "结果", "耗时ms", "解析", "轮数"} {
 		if _, ok := entry.KV[k]; !ok {
 			t.Errorf("合并后的这条缺 %q：got %v", k, entry.KV)
 		}
@@ -315,8 +286,7 @@ func TestSayWithEmptyContentIsVisible(t *testing.T) {
 	g := e.mem.Group("g1", "测试群")
 
 	e.decide(e.store.Get(), g, "有人@了我", "openid-x", "某人",
-		true, false, []string{"被@"}, 1.0,
-		nil, "", "", "", "", nil, "", true)
+		true, false, nil, "", "", "", "", nil, "", true)
 
 	entry := findDecision(t, "决策已得出")
 	if entry.KV["act"] != "say" {
@@ -334,12 +304,113 @@ func TestSayWithEmptyContentIsVisible(t *testing.T) {
 func TestMutedGroupGateIsVisible(t *testing.T) {
 	e := newGateEngine(t, nil)
 	e.mem.Group("g1", "测试群").Mute(10 * time.Minute)
-	fireGates(e, "g1", 1.0, []string{"被叫名字"}, 1)
+	fireGates(e, "g1", 1)
 
 	entry := findDecision(t, "静默期")
 	for _, k := range []string{"静默至", "剩余"} {
 		if _, ok := entry.KV[k]; !ok {
 			t.Errorf("静默期闸缺 %q：得知道它什么时候回来。got: %v", k, entry.KV)
 		}
+	}
+}
+// TestQuietFallbackWarnsAndKeepsOS 降级闭嘴那一路必须既留痕又保住 os。
+//
+// 2026-10-03 生产实况：模型只吐了 <os> 就被截断时，日志里是一条
+// `act quiet + os 空 + 解析 fallback`。三个问题叠在一起：
+//  1. os 被 parse.go 的降级出口丢了（「它为什么不说话」看不出来）
+//  2. 告警条件是「fallback+say」，而这条出口的 act 恒为 quiet → 一条都不响
+//  3. 管理端看到的 act=quiet 其实是解析器猜的，不是模型的判断
+//
+// 这条用例把三件事一起钉住：告警响了、os 进了决策日志、act 被标成猜的。
+func TestQuietFallbackWarnsAndKeepsOS(t *testing.T) {
+	// 只吐 os 就没了——精确命中 parse.go「剥完标签什么都不剩」那条出口
+	srv, _ := startFakeUpstream(t, []fakeStep{{content: `<os>懒得理他</os>`}})
+	e := newEngineWithUpstream(t, srv.URL, &recordingSender{}, nil, nil)
+	g := e.mem.Group("g1", "测试群")
+
+	e.decide(e.store.Get(), g, "有人在群里发了消息", "openid-x", "某人",
+		false, false, nil, "", "", "", "", nil, "", false)
+
+	// 1. 告警必须响。归到 CatDecision 是为了管理端默认视图能直接看到
+	// （logx/log.go 里 CatDecision 的定义就是「为什么闭嘴的全部」）。
+	warn := findDecision(t, "未解析到合法 JSON")
+	for _, k := range []string{"raw", "os"} {
+		if _, ok := warn.KV[k]; !ok {
+			t.Errorf("降级告警缺 %q：只剩一句「解析失败」没法定位，"+
+				"得能看到模型到底输出了什么、它自己想说什么。got: %v", k, warn.KV)
+		}
+	}
+
+	// 2. os 进了决策日志，且真的是模型写的那句
+	entry := findDecision(t, "决策已得出")
+	if v, _ := entry.KV["os"].(string); v != "懒得理他" {
+		t.Errorf("os 没进决策日志：got %q，期望 %q"+
+			"（管理端默认只看决策链路，os 丢了就等于什么都没说）",
+			entry.KV["os"], "懒得理他")
+	}
+	if v, _ := entry.KV["解析"].(string); v != "fallback" {
+		t.Fatalf("解析应是 fallback，实际 %q——用例会走到别的出口，等于没测到", v)
+	}
+
+	// 3. act 是解析器猜的，必须标出来
+	if v, _ := entry.KV["act来源"].(string); v != "解析器猜的" {
+		t.Errorf("降级轮次的 act 来自解析器硬编码，日志必须标明，got %q"+
+			"（不标的话 act=quiet 会被误读成「它自己决定闭嘴」）", entry.KV["act来源"])
+	}
+}
+
+// TestSayFallbackAlsoMarkedAsGuess 降级发言那一路**同样**要标「解析器猜的」。
+//
+// 这条一开始写的是「fallback+say 不该标注」，跑完发现是错的：parse.go
+// 三条降级出口全都没有模型给 act——quiet 那两条是硬编码 "quiet"，
+// 而 say 这条的 `Act: "say"` 连同 `Tone: "roast"` 一起是硬编码的
+//（parse.go:84）。所以「解析器猜的」对三条降级出口一视同仁，
+//
+// 这比「quiet 才标注」更诚实：降级轮次里模型的 tone、对象、记忆全都丢了，
+// 它唯一表达出来的就是 os 那一句话。看到「解析器猜的」就知道
+// 这一行的 act 和语气都不能当真。
+func TestSayFallbackAlsoMarkedAsGuess(t *testing.T) {
+	srv, _ := startFakeUpstream(t, []fakeStep{
+		{content: `<os>懒得理他</os>他今天话真多`},
+	})
+	e := newEngineWithUpstream(t, srv.URL, &recordingSender{}, nil, nil)
+	g := e.mem.Group("g1", "测试群")
+
+	e.decide(e.store.Get(), g, "有人在群里发了消息", "openid-x", "某人",
+		false, false, nil, "", "", "", "", nil, "", false)
+
+	entry := findDecision(t, "决策已得出")
+	if v, _ := entry.KV["解析"].(string); v != "fallback" {
+		t.Fatalf("解析应是 fallback，实际 %q——没走到降级路径，用例白测", v)
+	}
+	if v, _ := entry.KV["act来源"].(string); v != "解析器猜的" {
+		t.Errorf("降级发言时 act 也是解析器填的（parse.go 里 Act 和 Tone 都硬编码），"+
+			"必须同样标注。got %q", entry.KV["act来源"])
+	}
+	// os 仍然必须保住（另一条降级出口）
+	if v, _ := entry.KV["os"].(string); v != "懒得理他" {
+		t.Errorf("降级发言时 os 也要保住，got %q", entry.KV["os"])
+	}
+}
+
+// TestNormalRoundHasNoActSourceMark 正常轮次不该出现「解析器猜的」。
+//
+// 防止上面的标注逻辑写成「总是加上」——那会让 99% 的正常日志多一个字段。
+func TestNormalRoundHasNoActSourceMark(t *testing.T) {
+	srv, _ := startFakeUpstream(t, []fakeStep{
+		{content: `<os>懒得理他</os>` + `<json>{"act":"quiet","mem":[]}</json>`},
+	})
+	e := newEngineWithUpstream(t, srv.URL, &recordingSender{}, nil, nil)
+	g := e.mem.Group("g1", "测试群")
+
+	e.decide(e.store.Get(), g, "有人在群里发了消息", "openid-x", "某人",
+		false, false, nil, "", "", "", "", nil, "", false)
+
+	entry := findDecision(t, "决策已得出")
+	if v, _ := entry.KV["解析"].(string); v != "ok" {
+		t.Fatalf("解析应是 ok，实际 %q", v)
+	}
+	if _, ok := entry.KV["act来源"]; ok {
+		t.Errorf("正常解析的轮次不该标「解析器猜的」，got: %v", entry.KV["act来源"])
 	}
 }

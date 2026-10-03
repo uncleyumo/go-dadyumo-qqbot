@@ -21,6 +21,12 @@ import (
 // 但并不适合当长期默认——半价时段是 00:30-08:30，那会儿群里根本没人，
 // 把白天压到 20% 只会让机器人在大家真正在聊的时候装死。
 // 所以默认档是 daytime：白天几乎全在线，凌晨（本就没人）才降到平时水平。
+//
+// 3. 「全天」有两个档，别混：
+//     always        = 0.90，日常档，**仍有 10% 的概率不接话**
+//     always_strict = 1.00，调试/特殊场景，任何时候都必应
+//     历史教训：always 曾经叫「全天在线」，暗示 100%，实际是 0.90——名字在骗人，
+//     而且它零测试覆盖，所以这个矛盾活了很久才被发现。
 
 // baseOnlineRate 没匹配到任何窗口、且配置里没给 base_rate 时的兜底在线率
 const baseOnlineRate = 0.20
@@ -40,21 +46,31 @@ var schedulePresets = map[string][]config.ScheduleWindow{
 	"night_owl": {
 		{From: "18:00", To: "02:00", Rate: 0.80, Label: "夜里活跃"},
 	},
-	// 全天在线（只在预算上省钱，不省时段）
+	// 全天必应（调试 / 特殊场景用）：Rate 1.0。
+	// rand.Float64() 返回 [0,1)，所以 roll < 1.0 恒真——这是真·全天在线。
+	// 别拿它当长期默认：它不受任何时段约束，等于关掉 CONTRIBUTING 里
+	// 「它必须能闭嘴」那条硬约束，账单会随群活跃度线性涨。
+	"always_strict": {
+		{From: "00:00", To: "24:00", Rate: 1.0, Label: "全天必应"},
+	},
+	// 全天在（日常档）：全天 0.90，仍然有 10% 的概率闭嘴。
+	//
+	// 2026-10-03 拆档：这一档原来叫「全天在线」，暗示 100%，实际 0.90，
+	// 名字在骗人。拆成 always_strict(1.0) + always(0.9)。
+	//
+	// 保留 always 这个 id 不改名，是为了现网 config.json：写的是 "always"，
+	// 改名会让它变成未知值然后被 windowsFor 静默回落 daytime（0.85/0.50）——
+	// 一次没有报错、没有日志差异的行为变更，比 90% 变 100% 难查得多。
 	"always": {
-		{From: "00:00", To: "24:00", Rate: 0.90, Label: "全天"},
+		{From: "00:00", To: "24:00", Rate: 0.90, Label: "全天在"},
 	},
 }
 
-// schedulePresetNames 管理端下拉用
-var schedulePresetNames = []struct{ ID, Name string }{
-	{"daytime", "白天为主（默认·白天几乎全在线）"},
-	{"deepseek_offpeak", "DeepSeek 错峰半价（省钱，白天只有 20%）"},
-	{"night_owl", "夜猫子"},
-	{"always", "全天在线"},
-	{"random_daily", "每天随机（今天挑一段高活跃）"},
-	{"custom", "自定义（用下面的窗口表）"},
-}
+// 这里曾有一个 schedulePresetNames（管理端下拉用的名称表），2026-10-03 删掉：
+// 它零读取点，是块死字段——管理端下拉实际是 index.html 里硬编码的 <option>。
+// 留着它会制造「我改了 Go 这张表所以下拉同步了」的错觉，而真实同步点根本不在这里。
+//
+// 下拉与本表的同步由 preset_test.go 的双向相等测试守住（读 index.html 校对）。
 
 // parseClock 解析 HH:MM，支持 24:00 表示当天结束
 func parseClock(s string) (int, bool) {
@@ -106,7 +122,34 @@ func windowsFor(s config.ScheduleConfig, now time.Time) []config.ScheduleWindow 
 	if w, ok := schedulePresets[s.Mode]; ok {
 		return w
 	}
+	// 未知 mode 静默回落 daytime：进程照常启动，只是换了档位。
+	// 这本身是刻意的（配置写错不该让机器人起不来），但**改动 schedulePresets 的
+	// key 时必须想到历史 config.json 里已经写死的那些 id**——改了就是静默降级，
+	// 现场表现是「话变少了」，没人会想到是档位名失效了。
+	// TestUnknownModeFallsBackToDaytime 把这个行为钉成契约，改名前先去看它。
 	return schedulePresets["daytime"]
+}
+
+// KnownScheduleMode 报告一个档位 id 是否是本程序认识的。
+//
+// 存在的理由：windowsFor 对未知 mode 是**静默回落 daytime** 的（配置写错不该让
+// 机器人起不来，这是刻意行为）。但静默的代价是：改名或手误在现场表现成
+// 「话变少了」，没人会想到是档位名失效了。所以启动时必须显式校验一次。
+//
+// 注意 random_daily 与 custom 不在 schedulePresets 里（由 windowsFor 的 switch 特判），
+// 但它们同样是合法档位，所以这里要一并算作已知。
+func KnownScheduleMode(mode string) bool {
+	// 空串是合法的：Validate 之前 config.json 里没有 mode 字段就是空的，
+	// windowsFor 也把 "" 归到 custom 分支（windows 为空则回落 daytime）。
+	// 所以这里必须返回 true，否则全新配置启动时会误报「档位名不认识」。
+	if mode == "" {
+		return true
+	}
+	if mode == "random_daily" || mode == "custom" {
+		return true
+	}
+	_, ok := schedulePresets[mode]
+	return ok
 }
 
 // randomDailyWindows 每天随机挑一段高活跃时段。
@@ -188,12 +231,26 @@ type ScheduleDecision struct {
 //  2. 被 @ / 被点名 → 放行（@ 之后的宽限期内同样一律放行）
 //  3. 单聊 → 放行（私聊没有「水群成本」这回事）
 //  4. 其余按时段概率摇一次
+//
+// 这是 2026-10-03 起**唯一**的频率闸（冲动值闸门整套被废除）：它答的是
+// 「这会儿人在不在电脑前」，而这正是真人的真实状态——人不会每条消息都回，
+// 因为人有时候就没在看屏幕。要随机数只是为了省调用，不是为了决定「值不值得回」。
 func ScheduleAllow(s config.ScheduleConfig, now time.Time, atMe, isC2C bool, sinceAtHit time.Duration) bool {
-	return ScheduleDecide(s, now, atMe, isC2C, sinceAtHit).Allowed
+	return ScheduleDecide(s, now, atMe, isC2C, sinceAtHit, rand.Float64()).Allowed
 }
 
 // ScheduleDecide 同 ScheduleAllow，但返回完整判定过程供日志使用。
-func ScheduleDecide(s config.ScheduleConfig, now time.Time, atMe, isC2C bool, sinceAtHit time.Duration) ScheduleDecision {
+//
+// roll 是 0~1 的随机数，**由调用方传入**。这个设计不是为了测试方便：
+// 它是这套机制唯一的可观测窗口——日志里记了摇到的值，排查「为什么它今天
+// 特别话多」时只有这两个数字可用。随机源藏在函数内部时，日志记的 roll
+// 与实际比较的值无法对齐，排查就变成了猜。
+//
+// 副作用：同输入可复现了，测试不必再靠 2000 次采样统计放行率落在某个宽区间。
+// 过去就因为不可复现，测试被迫分成「直接调函数」+「os.ReadFile 去 grep
+// 源码字符串」两半（见 decisionlog_test.go 里的说明）。
+func ScheduleDecide(s config.ScheduleConfig, now time.Time, atMe, isC2C bool,
+	sinceAtHit time.Duration, roll float64) ScheduleDecision {
 	if !s.Enabled {
 		return ScheduleDecision{Allowed: true, Rate: 1, Why: "未启用时段调度"}
 	}
@@ -209,7 +266,6 @@ func ScheduleDecide(s config.ScheduleConfig, now time.Time, atMe, isC2C bool, si
 			Why: fmt.Sprintf("点名宽限期内（剩 %v）", grace-sinceAtHit)}
 	}
 	rate, label := OnlineRate(s, now)
-	roll := rand.Float64()
 	return ScheduleDecision{
 		Allowed: roll < rate,
 		Rate:    rate,

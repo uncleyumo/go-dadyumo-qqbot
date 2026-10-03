@@ -42,8 +42,8 @@ func TestEventRoundTrip(t *testing.T) {
 	d := openEventDB(t)
 	d.RecordEvent(Event{
 		Cat: "decision", Level: "INFO",
-		Msg: "跳过：冲动值不足", Group: "测试群",
-		KV: `{"冲动":"0.25","阈值":"0.40"}`,
+		Msg: "跳过：本次摇骰子没上线", Group: "测试群",
+		KV: `{"摇到":"0.73","在线率":"0.20","档位":"平时"}`,
 	})
 	flush(t, d, 1)
 
@@ -55,13 +55,13 @@ func TestEventRoundTrip(t *testing.T) {
 		t.Fatalf("查到 %d 条，期望 1", len(rows))
 	}
 	r := rows[0]
-	if r.Cat != "decision" || r.Level != "INFO" || r.Msg != "跳过：冲动值不足" {
+	if r.Cat != "decision" || r.Level != "INFO" || r.Msg != "跳过：本次摇骰子没上线" {
 		t.Errorf("基本字段不对: %+v", r)
 	}
 	if r.Group != "测试群" {
 		t.Errorf("群名没落: %q", r.Group)
 	}
-	if r.KV["冲动"] != "0.25" || r.KV["阈值"] != "0.40" {
+	if r.KV["摇到"] != "0.73" || r.KV["在线率"] != "0.20" {
 		t.Errorf("kv 没解析回来: %v", r.KV)
 	}
 	if r.TS.IsZero() {
@@ -74,7 +74,7 @@ func TestQueryEventsFilters(t *testing.T) {
 	d := openEventDB(t)
 	base := time.Now().Add(-2 * time.Hour)
 	for i, e := range []Event{
-		{Cat: "decision", Level: "INFO", Msg: "冲动值不足", Group: "群A"},
+		{Cat: "decision", Level: "INFO", Msg: "本次摇骰子没上线", Group: "群A"},
 		{Cat: "decision", Level: "WARN", Msg: "预算用尽", Group: "群A"},
 		{Cat: "speak", Level: "INFO", Msg: "已发言 你看看你", Group: "群B"},
 		{Cat: "chat", Level: "INFO", Msg: "群消息 内容", Group: "群B"},
@@ -98,7 +98,7 @@ func TestQueryEventsFilters(t *testing.T) {
 		// runtime 是「未分类」的显示名，落库时是空串 —— 这个翻译必须生效，
 		// 否则前端选「未分类」会一条都查不到
 		{"未分类", EventFilter{Cats: []string{"runtime"}}, 1},
-		{"关键字", EventFilter{Q: "冲动"}, 1},
+		{"关键字", EventFilter{Q: "摇骰子"}, 1},
 		{"关键字查 kv", EventFilter{Q: "预算"}, 1},
 		{"分类+级别", EventFilter{Cats: []string{"decision"}, Levels: []string{"INFO"}}, 1},
 		// 5 条都写在 2 小时前（含 0~4 分钟的错开），最近 1 小时内一条都没有。
@@ -221,8 +221,8 @@ func TestLogSinkConvertsEntry(t *testing.T) {
 		TS:    time.Now().Format("2006-01-02 15:04:05.000"),
 		Cat:   logx.CatDecision,
 		Level: "INFO",
-		Msg:   "跳过：冲动值不足",
-		KV:    map[string]any{"group": "测试群二号", "冲动": "0.25"},
+		Msg:   "跳过：本次摇骰子没上线",
+		KV:    map[string]any{"group": "测试群二号", "摇到": "0.73"},
 	})
 	flush(t, d, 1)
 
@@ -239,7 +239,7 @@ func TestLogSinkConvertsEntry(t *testing.T) {
 	if r.Group != "测试群二号" {
 		t.Errorf("group 没从 kv 提取出来: %q", r.Group)
 	}
-	if r.KV["冲动"] != "0.25" {
+	if r.KV["摇到"] != "0.73" {
 		t.Errorf("kv 丢了: %v", r.KV)
 	}
 	if r.TS.IsZero() {

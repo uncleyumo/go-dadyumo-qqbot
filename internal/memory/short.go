@@ -12,7 +12,15 @@ import (
 // MaxFacts 每个群最多记住多少条长期要点。
 // 要点会进提示词，记太多既烧 token 又容易把模型带跑偏。
 // 导出给管理端，用于展示「已用 n/MaxFacts」。
-const MaxFacts = 24
+//
+// 2026-10-03 从 const 改成 var：原来硬编码 24，配不了。
+// 而它是**全局唯一的容量**——所有群共用一个上限，配置一次全局生效。
+// 做成 var 而不是给 SetFact 加参数，是为了不牵动 15 处测试调用点
+// （签名一变全线要改，而「每群不同上限」这个需求并不存在）。
+//
+// 启动时由 cmd 下的 main 从 brain.max_facts 写入；没配置时保持 24。
+// 注意它是包级可变状态：测试里改它要记得改回去，否则会互相污染。
+var MaxFacts = 24
 
 // Role 说话人角色
 const (
@@ -227,6 +235,27 @@ func (s *Store) RemoveGroup(openID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.m, openID)
+}
+
+// Clear 清空全部群记忆，返回被清掉的群数。
+//
+// 用途只有一个：切人设。换人设不重置记忆会把上一版积累的事实、成员画像、
+// 摘要一起带过去，那些东西是按旧人设的判断流程攒的，新人设读它们只会
+// 学到已经废掉的行为（例如复读旧口头禅、把旧账当筹码翻出来）。
+//
+// 只清 Store。stats.db 里的 calls / events 是调用与事件流水，本来就是
+// 用来做前后对比的统计源，跟人设无关，不在这里动。
+//
+// 注意：调用方必须先备份 memory.json。写回空快照会被 persist.go 的
+// guardAgainstEmptyOverwrite 拒绝（它存在的目的正是拦住空覆盖），
+// 所以正确顺序是「备份 → 移走原文件 → Clear → SaveTo」，
+// 由 admin.handleMemoryClear 负责。
+func (s *Store) Clear() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.m)
+	s.m = make(map[string]*Group)
+	return n
 }
 
 // SetLeft 标记/清除「机器人已被移出该群」

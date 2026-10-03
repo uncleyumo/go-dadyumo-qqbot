@@ -2,7 +2,6 @@ package brain
 
 import (
 	"testing"
-	"time"
 )
 
 // 刷屏识别的验收标准。
@@ -13,10 +12,17 @@ import (
 //	「6 / 表情包批发呢你」  14:01:48
 //	「有事说事，别光发图」  14:02:44
 //
-// 成因：表情走正文文本路径，绕过了图片刷屏那套 imgSpamCount 机制，
-// 连发把攒批条数顶上去，wChatter+wManyNew 合计 0.40 挤过了门限。
+// 成因不是「它判断错了该不该理」，而是**程序给模型编了一条假线索**：
+// 过去 trigger 只说「某某刚在群里说了话」，加上「攒了一批新消息」把冲动值
+// 顶过门限，模型据此以为有人在跟它聊天。
+//
+// 2026-10-03 的处理：冲动值机制整套废除，刷屏硬闸也删了。
+// IsOnlyPlaceholders 保留下来，但只用来**陈述事实**——
+// 让 buildTrigger 能如实说「这批发的是表情，一个字都没有」，
+// 至于该不该理，模型自己判断。群里连发八个「666」，
+// 一个真人看到也可能接一句「你复读机啊」，机械跳过才是错的。
 
-// 生产日志里的原样 payload（清洗后）
+// TestIsOnlyPlaceholders 刷屏识别的准确率：只认「真的一个字都没有」。
 func TestIsOnlyPlaceholders(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -40,32 +46,19 @@ func TestIsOnlyPlaceholders(t *testing.T) {
 	}
 }
 
-// 连发 8 个表情不该产生任何「值得插一句」的冲动
-func TestFaceSpamDoesNotTriggerImpulse(t *testing.T) {
-	// 不带刷屏压制时，8 条消息的冲动值刚好过常见阈值
-	base := ComputeImpulse(ImpulseInput{
-		Chatter: true, NewCount: 8, SinceSpeak: time.Hour,
-	})
-	if base.Score < 0.35 {
-		t.Fatalf("前置条件不成立：8 条消息的基线冲动值应够门槛，实际 %.2f", base.Score)
-	}
-
-	// 压制后必须掉到门限以下
-	after := base.Score - wChatter - wManyNew
-	if after >= 0.35 {
-		t.Errorf("刷屏压制后冲动值仍过高: %.2f", after)
-	}
-}
-
-// 有实义内容混进同一批时，压制必须撤销
-func TestFaceSpamSuppressionLiftedByRealContent(t *testing.T) {
+// TestFaceSpamFlagLiftedByRealContent 混进正经话就撤销刷屏标记。
+//
+// 这条现在比过去更重要：过去还有一道硬闸兜着（就算 faceSpam 判错了，
+// 整批也只是被硬闸拦下），现在 faceSpam 唯一的用途是写进 trigger 告诉模型。
+// 判错了就是直接给模型一句假事实——「这批发的是表情，一个字都没有」，
+// 而实际混着一句正经话。
+func TestFaceSpamFlagLiftedByRealContent(t *testing.T) {
 	// 这是 OnMessage 里的 else 分支在做的事：混进正经话就撤销刷屏标记。
-	// 不撤销的话「连发七个表情 + 一句正经话」会被误毙掉。
 	faceSpam := true
 	if !IsOnlyPlaceholders("最后说一句，今天真冷") {
 		faceSpam = false
 	}
 	if faceSpam {
-		t.Error("混进实义内容后刷屏标记应撤销，否则会误伤正常对话")
+		t.Error("混进实义内容后刷屏标记应撤销，否则会给模型一句假事实（这批全是表情）")
 	}
 }

@@ -186,7 +186,7 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
     <div class="tab" data-p="endpoints">接入点与模型</div>
     <div class="tab" data-p="persona">人设与策略</div>
     <div class="tab" data-p="memes">表情包</div>
-    <div class="tab" data-p="groups">群与主人</div>
+    <div class="tab" data-p="groups">群与开发者</div>
     <div class="tab" data-p="logs">日志</div>
   </div>
   <button class="ghost sm" id="logout">退出</button>
@@ -299,8 +299,6 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
         <small class="hint"><span class="hint-tag">每行一条</span>什么情况不接话。「能闭嘴」是它像真人的第一条底线，建议至少保留一两条。</small></div></div>
       <div class="row"><label>何时不伺候</label><div class="fld"><textarea id="pf-refuse" class="ta-list"></textarea>
         <small class="hint warn"><span class="hint-tag">每行一条</span>⚠️ 别写一刀切拒答。「凡是求助都拒绝」会误伤真心求教的人；只写被当工具反复使唤、被恶意测试时的分寸。</small></div></div>
-      <div class="row"><label>对开发者的态度</label><div class="fld"><textarea id="pf-loyalty" class="ta-md"></textarea>
-        <small class="hint">面对主人（开发者）时的特殊态度。</small></div></div>
       <div class="row"><label>单条最大字数</label><div class="fld"><input id="pf-max" type="number">
         <small class="hint">建议 80~150。超过会显得在写小作文，不像真人说话。</small></div></div>
     </div>
@@ -310,18 +308,20 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
       <div class="grid2">
         <div class="row"><label>每日调用预算</label><div class="fld"><input id="bf-budget" type="number">
           <small class="hint">每天最多发起多少次 LLM 调用（硬闸门），0=不限。建议 300~500。</small></div></div>
-        <div class="row"><label>冲动阈值</label><div class="fld"><input id="bf-imp" type="number" step="0.05">
-          <small class="hint">开口门槛 0~1，越高越安静。建议 0.5~0.7。</small></div></div>
         <div class="row"><label>攒批静默（秒）</label><div class="fld"><input id="bf-deb" type="number">
           <small class="hint">收到消息先等这么久再决定说不说话，能把一串消息合并成一轮处理——省钱第一旋钮。建议 20~45。</small></div></div>
         <div class="row"><label>攒批抖动（秒）</label><div class="fld"><input id="bf-debj" type="number">
           <small class="hint">攒批时间上叠加的随机抖动，防机械感。建议 5~15。</small></div></div>
-        <div class="row"><label>最小发言间隔（秒）</label><div class="fld"><input id="bf-minsp" type="number">
-          <small class="hint">两次发言的最小间隔。建议 30~60。</small></div></div>
         <div class="row"><label>上下文预算(token)</label><div class="fld"><input id="bf-ctx" type="number">
           <small class="hint">历史消息最多带多少 token（只管历史，人设提示词另算约 2.5K）。建议 3200；模型窗口至少 12K 才不撞。</small></div></div>
         <div class="row"><label>短期记忆条数</label><div class="fld"><input id="bf-hist" type="number">
-          <small class="hint">每群保留多少条近期对话。建议 30~50；长期运行靠滚动摘要，别靠无限加条数。</small></div></div>
+          <small class="hint">每群保留多少条近期对话（原话）。建议 30~50；长期运行靠滚动摘要，别靠无限加条数。<br>
+            <b>改小不会立刻清空已有记忆</b>，是随新消息到来逐渐滑到新上限。</small></div></div>
+        <div class="row"><label>长期要点条数</label><div class="fld"><input id="bf-facts" type="number">
+          <small class="hint">每群最多记住多少条<b>结论</b>（模型自己写的，比如「他叫老张，在苏州做监理」），满了按最旧淘汰。
+            建议 12~30。<br>
+            ⚠️ 它和上面的<b>短期记忆是两个独立的池子</b>，别当成一回事：30 条原话 ≠ 24 条结论。
+            实际内容在下面群卡片的「长期记忆 (n/上限)」折叠区里，可以直接编辑和删除。</small></div></div>
         <div class="row"><label>温度</label><div class="fld"><input id="bf-temp" type="number" step="0.05">
           <small class="hint">越高越野、越低越稳。建议 0.7~0.9。</small></div></div>
         <div class="row"><label>最大输出 token</label><div class="fld"><input id="bf-out" type="number">
@@ -343,7 +343,7 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
         <div class="row"><label>每字追加(ms)</label><div class="fld"><input id="sf-per" type="number">
           <small class="hint">消息每多一个字多等这么久——这是「像在打字」最明显的信号。建议 120~200。</small></div></div>
         <div class="row"><label>被点名时提速</label><div class="fld"><input id="sf-eager" type="number" step="0.05">
-          <small class="hint">被 @、被叫名字、主人说话时按这个系数整体提速（0.5 = 快一半）。这些场景下群友在等，慢几秒就以为掉线了。</small></div></div>
+          <small class="hint">被 @、被叫名字、开发者说话时按这个系数整体提速（需在「群与开发者」里打开开发者特权）（0.5 = 快一半）。这些场景下群友在等，慢几秒就以为掉线了。</small></div></div>
         <div class="row"><label>尾部加速</label><div class="fld"><input id="sf-ramp" type="number" step="0.02">
           <small class="hint">多条连发时后面几条按 (1 − 该值×序号) 缩短间隔。真人发消息是越说越急的，固定间隔才是机器人感。建议 0.15~0.25，0 = 不加速。</small></div></div>
         <div class="row"><label>开口前思考(ms)</label><div class="fld"><input id="sf-first" type="number">
@@ -360,11 +360,15 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
           <option value="daytime">白天为主（默认·白天几乎全在线）</option>
           <option value="deepseek_offpeak">DeepSeek 错峰半价（省钱，白天只有 20%）</option>
           <option value="night_owl">夜猫子</option>
-          <option value="always">全天在线</option>
+          <option value="always">全天在 90%（日常档·仍有 10% 概率不接话）</option>
+          <option value="always_strict">全天必应 100%（调试/特殊场景·不随机）</option>
           <option value="random_daily">每天随机（今天挑一段高活跃）</option>
           <option value="custom">自定义（用下面的窗口表）</option>
         </select>
-          <small class="hint">默认「白天为主」：错峰半价时段（00:30-08:30）群里没人，白天压活跃度只会让它不理人。</small></div></div>
+          <small class="hint">默认「白天为主」：错峰半价时段（00:30-08:30）群里没人，白天压活跃度只会让它不理人。<br>
+            <b>「全天」有两档，别按名字猜</b>：<code>always</code> 是 90%（日常档，仍有 10% 概率不接话）；
+            <code>always_strict</code> 才是 100% —— 它等于关掉了在线率闸门，等于废掉「它必须能闭嘴」那条约束，
+            账单随群活跃度线性涨，<b>只用于调试或特殊场景，别长期用</b>。</small></div></div>
         <div class="row"><label>@ 后实时宽限(秒)</label><div class="fld"><input id="sch-grace" type="number">
           <small class="hint">被 @ 之后这么长的时间内保持实时回应，不走概率。建议 300。</small></div></div>
         <div class="row"><label>平时在线率(0~1)</label><div class="fld"><input id="sch-base" type="number" step="0.05" min="0" max="1">
@@ -438,15 +442,20 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
     <div class="savebar"><button onclick="saveCfg()">保存并生效</button></div>
   </section>
 
-  <!-- ============ 群与主人 ============ -->
+  <!-- ============ 群与开发者 ============ -->
   <section id="p-groups" class="hide">
     <div class="panel">
-      <h2>主人绑定 <span class="hint">群里回调只给 openid，认人只能靠这张表</span></h2>
+      <h2>开发者绑定 <span class="hint">群里回调只给 openid，认人只能靠这张表</span></h2>
       <div class="row"><label>昵称</label><div class="fld"><input id="mf-nick" style="max-width:220px"></div></div>
       <div class="row"><label>QQ（仅备注）</label><div class="fld"><input id="mf-qq" style="max-width:220px"></div></div>
       <div class="row"><label>认主口令</label><div class="fld"><input id="mf-token" style="max-width:320px">
         <small class="hint">在群里发「#认主 口令」即可自动绑定，绑定成功后建议关掉下面的开关。</small></div></div>
       <div class="row"><label>允许口令绑定</label><div class="fld"><input id="mf-bindon" type="checkbox" style="width:auto"></div></div>
+      <div class="row"><label>开发者特权</label><div class="fld"><input id="mf-deven" type="checkbox" style="width:auto">
+        <small class="hint"><b>默认关。关着时，开发者的消息和群友完全一样</b>——不过在线率闸、不豁免预算、不用快节奏、提示词里也不标身份。<br>
+          开着时它会无条件回应、超出预算也照应、说话节奏更快，并在提示词里被标出来。
+          <b>建议保持关闭</b>：开着时你对它说话永远比群友更容易得到回应，拿这个有偏的样本判断它是不是话太多会查不出真实问题。<br>
+          这个开关<b>不影响</b>下面的绑定与口令——认人和特权是两件事。改完要点「保存」。</small></div></div>
       <div style="margin-top:10px" class="muted">已绑定 <span id="mf-count">0</span> 个 openid：</div>
       <div id="mf-list" class="muted" style="margin-top:6px;word-break:break-all"></div>
       <button class="sm" style="margin-top:12px" onclick="saveCfg()">保存</button>
@@ -455,6 +464,7 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
     <div class="panel">
       <h2>群状态 <span class="hint">平台不暴露群名：代号是 openid 尾 8 位，给每个群填一次「别名」即可永久显示人话。被移出的群会自动标「已退群」</span>
         <button class="ghost sm" style="margin-left:auto" onclick="loadState(true)">刷新</button>
+        <button class="danger sm" onclick="clearAllMemory()">清空全部记忆</button>
       </h2>
       <div id="groups"></div>
     </div>
@@ -488,7 +498,7 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
           <option value="ERROR">仅 ERROR</option>
         </select></div></div>
         <div style="flex:1;min-width:200px"><label>关键字</label><div class="fld">
-          <input id="logs-q" type="search" placeholder="搜消息内容或参数，例如「冲动值」「预算」">
+          <input id="logs-q" type="search" placeholder="搜消息内容或参数，例如「摇到」「预算」「在线率」">
         </div></div>
       </div>
       <div class="logs" id="logs"></div>
@@ -1233,17 +1243,15 @@ function renderPersona() {
   document.getElementById('pf-red').value = (p.red_lines || []).join('\n');
   document.getElementById('pf-silence').value = (p.silence_rules || []).join('\n');
   document.getElementById('pf-refuse').value = (p.refuse_rules || []).join('\n');
-  document.getElementById('pf-loyalty').value = p.loyalty || '';
   document.getElementById('pf-max').value = p.max_chars || 0;
   document.getElementById('bf-budget').value = b.daily_budget || 0;
-  document.getElementById('bf-imp').value = b.impulse_threshold || 0;
   document.getElementById('bf-hist').value = b.max_history || 0;
+  document.getElementById('bf-facts').value = b.max_facts || 0;
   document.getElementById('bf-temp').value = b.temperature || 0;
   document.getElementById('bf-out').value = b.max_out_tokens || 0;
   document.getElementById('bf-deb').value = b.debounce_sec || 0;
   document.getElementById('bf-debj').value = b.debounce_jitter_sec || 0;
   document.getElementById('bf-ctx').value = b.max_ctx_tokens || 0;
-  document.getElementById('bf-minsp').value = b.min_speak_interval_sec || 0;
   const sp = CFG?.speak || {};
   document.getElementById('sf-maxseg').value = sp.max_segments || 0;
   document.getElementById('sf-maxchar').value = sp.max_seg_chars || 0;
@@ -1276,17 +1284,15 @@ function collectPersona() {
   CFG.persona.red_lines = lines(document.getElementById('pf-red').value);
   CFG.persona.silence_rules = lines(document.getElementById('pf-silence').value);
   CFG.persona.refuse_rules = lines(document.getElementById('pf-refuse').value);
-  CFG.persona.loyalty = document.getElementById('pf-loyalty').value;
   CFG.persona.max_chars = +document.getElementById('pf-max').value || 0;
   CFG.brain.daily_budget = +document.getElementById('bf-budget').value || 0;
-  CFG.brain.impulse_threshold = +document.getElementById('bf-imp').value || 0;
   CFG.brain.max_history = +document.getElementById('bf-hist').value || 0;
+  CFG.brain.max_facts = +document.getElementById('bf-facts').value || 0;
   CFG.brain.temperature = +document.getElementById('bf-temp').value || 0;
   CFG.brain.max_out_tokens = +document.getElementById('bf-out').value || 0;
   CFG.brain.debounce_sec = +document.getElementById('bf-deb').value || 0;
   CFG.brain.debounce_jitter_sec = +document.getElementById('bf-debj').value || 0;
   CFG.brain.max_ctx_tokens = +document.getElementById('bf-ctx').value || 0;
-  CFG.brain.min_speak_interval_sec = +document.getElementById('bf-minsp').value || 0;
   CFG.speak = CFG.speak || {};
   CFG.speak.max_segments = +document.getElementById('sf-maxseg').value || 0;
   CFG.speak.max_seg_chars = +document.getElementById('sf-maxchar').value || 0;
@@ -1301,6 +1307,7 @@ function collectPersona() {
   CFG.master.qq = document.getElementById('mf-qq').value;
   CFG.master.bind_token = document.getElementById('mf-token').value;
   CFG.master.bind_enabled = document.getElementById('mf-bindon').checked;
+  CFG.master.dev_enabled = document.getElementById('mf-deven').checked;
   CFG.qq.sandbox = document.getElementById('qf-sandbox').checked;
   CFG.qq.prefer_passive = document.getElementById('qf-passive').checked;
   CFG.qq.require_signature = document.getElementById('qf-sign').checked;
@@ -1411,7 +1418,7 @@ async function ovlForce() {
   }
 }
 
-/* ================= 群与主人 ================= */
+/* ================= 群与开发者 ================= */
 
 function renderMaster(s) {
   const m = (s && s.master) || CFG?.master || {};
@@ -1419,18 +1426,19 @@ function renderMaster(s) {
   document.getElementById('mf-qq').value = m.qq || '';
   document.getElementById('mf-token').value = m.bind_token || '';
   document.getElementById('mf-bindon').checked = !!m.bind_enabled;
+  document.getElementById('mf-deven').checked = !!m.dev_enabled;
   const ids = m.openids || [];
   document.getElementById('mf-count').textContent = ids.length;
   document.getElementById('mf-list').innerHTML = ids.length
     ? ids.map(id => `<div>${esc(id)} <button class="ghost sm" onclick="unbind('${escJ(id)}')">解绑</button></div>`).join('')
-    : '（还没绑定任何人。可以在下面的群成员列表里点「设为主人」，或在群里发认主口令）';
+    : '（还没绑定任何人。可以在下面的群成员列表里点「设为开发者」，或在群里发认主口令）';
 }
 
 // 说明：这些「轻量写」都用 FORCE_REDRAW 请求重画，而不是 LAST_REV = -1。
 // 后者会让下一次保存发出 rev=-1，服务端 clientRev >= 0 不成立 → 乐观锁被静默跳过。
 async function bind(openid, name) {
   const r = await api('/api/bind', {openid, name});
-  if (r && r.ok) { toast('已设为主人'); FORCE_REDRAW = true; loadState(); } else toast((r && r.msg) || '绑定失败', true);
+  if (r && r.ok) { toast('已设为开发者'); FORCE_REDRAW = true; loadState(); } else toast((r && r.msg) || '绑定失败', true);
 }
 async function unbind(openid) {
   const r = await api('/api/unbind', {openid});
@@ -1451,6 +1459,21 @@ async function removeGroup(openid, name) {
   const r = await api('/api/group/remove', {openid});
   if (r && r.ok) { toast('已移除该群数据'); FORCE_REDRAW = true; loadState(); }
   else toast((r && r.msg) || '移除失败', true);
+}
+
+// clearAllMemory 清空所有群的记忆，用途只有一个：切人设。
+// 只切人设不重置记忆，模型会把旧人设攒下来的事实、成员画像、摘要一起读进去，
+// 于是上一版的行为原样复活（复读旧口头禅、把旧账当筹码翻出来）。
+// stats.db 里的调用与事件流水不动——那是前后对比的统计源，跟人设无关。
+async function clearAllMemory() {
+  if (!confirm('确认清空所有群的记忆？\n\n切人设必须做这一步。只切人设不重置记忆，上一版的判断攒下来的事实、成员画像、摘要会被新人设读回去。\n\n（记住的事、成员画像、最近记录全部删掉；调用统计不删）')) return;
+  if (!confirm('再确认一次：这下是真的清空，没有撤销。\n（原文件会自动备份成 memory.json.bak-时间戳，出问题可以手工挪回来）')) return;
+  const r = await api('/api/memory/clear', {});
+  if (r && r.ok) {
+    toast(`已清空 ${r.groups} 个群的记忆${r.backup ? '，原文件已备份' : ''}`);
+    FORCE_REDRAW = true; loadState();
+  }
+  else toast((r && r.msg) || '清空失败', true);
 }
 
 /* ---- 长期记忆编辑：与别名一样是 change 即存的轻量写，不走 rev 乐观锁 ---- */
@@ -1550,8 +1573,8 @@ function renderGroups(s) {
           <td class="muted" style="word-break:break-all">${esc(m.openid)}</td>
           <td class="muted">${m.msg_count} 条</td>
           <td class="muted">${esc(m.note || '')}</td>
-          <td>${m.is_master ? '<span style="color:var(--ok)">主人</span>' :
-            `<button class="ghost sm" onclick="bind('${escJ(m.openid)}','${escJ(m.name)}')">设为主人</button>`}</td>
+          <td>${m.is_master ? '<span style="color:var(--ok)">开发者</span>' :
+            `<button class="ghost sm" onclick="bind('${escJ(m.openid)}','${escJ(m.name)}')">设为开发者</button>`}</td>
         </tr>`).join('')}
         </tbody></table></details>` : ''}
     </div>`;

@@ -25,8 +25,9 @@ func testGroup(t *testing.T) *memory.Group {
 }
 
 // TestBuildTriggerNamesTheSpeaker trigger 必须报出名字，不能只说「有人」。
+// 签名：atMe, nameCalled, fromMaster, question, replyToBot, faceSpam, atOthers, newCount, who, atAll
 func TestBuildTriggerNamesTheSpeaker(t *testing.T) {
-	got := buildTrigger(true, false, false, false, false, 1, "张三", false)
+	got := buildTrigger(true, false, false, false, false, false, false, 1, "张三", false)
 	if !strings.Contains(got, "张三") {
 		t.Errorf("trigger 应包含发言人昵称，got: %s", got)
 	}
@@ -35,13 +36,13 @@ func TestBuildTriggerNamesTheSpeaker(t *testing.T) {
 	}
 
 	// 多条消息时必须提醒分清人
-	many := buildTrigger(true, false, false, false, false, 4, "张三", false)
+	many := buildTrigger(true, false, false, false, false, false, false, 4, "张三", false)
 	if !strings.Contains(many, "分清") && !strings.Contains(many, "不止一个") {
 		t.Errorf("多条消息时应提醒模型分清说话人，got: %s", many)
 	}
 
 	// 没有名字时兜底，不能拼出空
-	if got := buildTrigger(false, false, false, false, false, 1, "", false); !strings.Contains(got, "有人") {
+	if got := buildTrigger(false, false, false, false, false, false, false, 1, "", false); !strings.Contains(got, "有人") {
 		t.Errorf("缺名字时应兜底为「有人」，got: %s", got)
 	}
 }
@@ -52,7 +53,7 @@ func TestBuildTriggerNamesTheSpeaker(t *testing.T) {
 // 不点破的话模型会以为这条是在跟它说话，然后学聊天记录里的 @全体成员 字样，
 // 回一句「你自己@all不就完了」——2026-10-01 群里真实发生过。
 func TestBuildTriggerReportsAtAll(t *testing.T) {
-	got := buildTrigger(false, false, false, false, false, 1, "群友甲", true)
+	got := buildTrigger(false, false, false, false, false, false, false, 1, "群友甲", true)
 	if !strings.Contains(got, "全体成员") {
 		t.Errorf("trigger 应说明有人 @ 了全体成员，got: %s", got)
 	}
@@ -60,34 +61,37 @@ func TestBuildTriggerReportsAtAll(t *testing.T) {
 		t.Errorf("trigger 应点破这不是在跟它说话，got: %s", got)
 	}
 	// 没有 atAll 时不能凭空多出这句
-	plain := buildTrigger(false, false, false, false, false, 1, "群友甲", false)
+	plain := buildTrigger(false, false, false, false, false, false, false, 1, "群友甲", false)
 	if strings.Contains(plain, "全体成员") {
 		t.Errorf("没 @ 全体时不该提，got: %s", plain)
 	}
 }
 
-// TestRenderLinesMarksMaster 主人必须被显式标出来，模型才认得出是谁。
-func TestRenderLinesMarksMaster(t *testing.T) {
+// TestRenderLinesMarksDeveloper 开发者必须被显式标出来，模型才认得出是谁。
+//
+// 注意这个测试直接给 renderLines 传 map，不走 masterSet —— masterSet 的开关
+// 门有独立的测试（TestDevPrivilegeOffNoMasterTagInHistory）。
+func TestRenderLinesMarksDeveloper(t *testing.T) {
 	lines := []memory.Line{
 		{Role: memory.RoleUser, Name: "张三", OpenID: "openid-zhang", Content: "在吗"},
 		{Role: memory.RoleBot, Content: "在"},
 	}
 	g := testGroup(t)
 	out := renderLines(g, lines, map[string]bool{"openid-zhang": true})
-	if !strings.Contains(out, "张三（主人）") {
-		t.Errorf("主人应被标记，got: %s", out)
+	if !strings.Contains(out, "张三（开发者）") {
+		t.Errorf("开发者应被标记，got: %s", out)
 	}
 	if !strings.Contains(out, "· 你：") {
 		t.Errorf("机器人自己的话应有独立前缀，got: %s", out)
 	}
-	if !strings.Contains(out, "· 张三（主人）：在吗") {
+	if !strings.Contains(out, "· 张三（开发者）：在吗") {
 		t.Errorf("行格式应为「· 名字：内容」，got: %s", out)
 	}
 
-	// 非主人不应被误标
+	// 非开发者不应被误标
 	out2 := renderLines(g, lines, map[string]bool{"openid-li": true})
-	if strings.Contains(out2, "张三（主人）") {
-		t.Errorf("非主人不应被标为主人，got: %s", out2)
+	if strings.Contains(out2, "张三（开发者）") {
+		t.Errorf("非开发者不该被标记，got: %s", out2)
 	}
 }
 

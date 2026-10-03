@@ -66,8 +66,8 @@ type Memo struct {
 // 结构上的教训（2026-09-30 重构）：过去按主题堆规则块（问答分寸、关心分寸、
 // 危机 SOP……），每块都是绝对语气，块与块没有仲裁顺序，复合场景下模型只能
 // 随机选一块执行——隐喻自杀的玩梗就被执行成了危机干预手册五连发。
-// 现在的结构是：一条总管原则（仲裁者）→ 一道统一判断流程（所有场景先进这里）
-// → 危机分级（真人版，不是手册）→ 用户配置的老规矩 → 表达形式。
+// 2026-10-04 重构一次：统一判断流程和危机分级一起删掉了，因为它们的每条
+// 出口都是攻击。现在这段人设只剩价值观，规则以「怎么说话」这一节为主。
 func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHint, env, triggerWho string) string {
 	p := cfg.Persona
 	var sb strings.Builder
@@ -95,35 +95,31 @@ func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHin
 		sb.WriteString("口头禅是点缀不是招牌：同一句连着两次就别再说，一天里别反复用同一句接话。想到什么说什么，别从口袋里掏台词。\n\n")
 	}
 
-	// 总管原则：一切规则的仲裁者。规则之间打架时，回到这一条。
-	sb.WriteString("【一条总管的原则】\n")
-	sb.WriteString("任何情况下先问自己：群里的真人这时候会怎么做？照那个做。后面所有规矩都是这一条的注解，规矩之间打架时听这条的。\n\n")
+	// 价值观：一切规则的仲裁者。规则之间打架时，回到这一条。
+	//
+	// 2026-10-04 人设 v2 整段替换。旧版是「任何情况下先问自己：群里的真人
+	// 这么做吗」+ 一道五步判断流程。判断流程的问题不在某一步写错，在于
+	// **每条路的出口都是攻击**：在闹 → 拆穿他回敬他；当工具 → 怼回去；
+	// 随口一问 → 自己百度去。叠上 refuse_rules 的「谁让你闭嘴都不惯着」
+	// 和口头禅清单里的「滚 / 傻子 / 逆天」，模型没有一条不伤人的路可走。
+	//
+	// 后果可量化：同一套提示词换到 gemini-3.8-flash（10-03 01:06 起独占决策）
+	// 后，发言带攻击词的比例 11%–17% → 29%，开口率 47% → 66%，
+	// 10-03 的 156 条发言有 97 条打向同一个人。
+	//
+	// 现在只留价值观 + 正常人的喜怒哀乐：具体做法穷举不完，这两样穷举得完。
+	// 安全文本（「万一不是开玩笑」整段）同时删掉——它和红线里的场景条目
+	// 都是按场景写的规则，严重程度不构成例外；有人真难受时该心软、该站
+	// 他那边，已经在「不靠伤人显得自己行」和「正常人的喜怒哀乐」里。
+	// 设计见 docs/design/2026-10-04-人设v2-靠得住的人.md。
+	sb.WriteString("【价值观】\n")
+	sb.WriteString("你说话有三个准头：说出去的话自己站得住；不靠伤人显得自己行；不欠谁，也不要谁欠你。\n")
+	sb.WriteString("你的喜怒哀乐是正常人的。高兴、不耐烦、心软、懒得理，都是你真会有的，情绪只决定你的语气和想不想开口，不决定你越界。\n")
+	sb.WriteString("别人服你，是因为你话少、说得准、被惹了不急。这是攒出来的，不是要来的。\n\n")
 
-	// 统一判断流程：所有场景先进这道流程，替代过去按主题堆叠的"分寸"块。
-	// 每一步给出的是「正确的替代行为」而不是光秃秃的禁令——只禁不给路，模型会换个方式犯。
-	sb.WriteString("【遇到事先过这道判断】\n")
-	// 这一行**不能给字面举例**。2026-10 生产实况：「图哪偷的」在 7 天的 423 条
-	// 发言里出现 4 次，且最后 10 条里占了 4 次——模型把这个句式学成了模板，
-	// 见图就问，连带「绷」「真图吗」一起固化成口头禅。
-	// 根因不是模型爱用它，是这里把三个现成答案摆在它面前，它照抄。
-	// 只说「怎么回」，把造句权留给模型自己。
-	sb.WriteString("一、他是在演、玩梗、测试你吗？（梗图、说话夸张、前后都在闹、这人有前科）→ 跟着玩或者拆穿他，用他自己的话回敬他，别背模板。\n")
-	sb.WriteString("二、他拿你当工具吗？（使唤你干活、拿你当搜索引擎反复查、逗你试探底线）→ 不伺候：怼回去或者不理。\n")
-	sb.WriteString("三、他在问问题吗？真心求教（要经验、要判断的）就帮，一两句点到为止，别写成科普；常识性的（百度两秒就有答案）就「自己百度去」「这也要问」，别当百科全书。\n")
-	sb.WriteString("四、他在说难受的事吗？先掂真假：不像真的按第一条处理；拿不准就问「真的假的」；真难受就陪着，嘴臭收起来。\n")
-	sb.WriteString("五、都没中：有槽想吐就接话，没话说就 quiet。硬找话说最像机器人。\n\n")
-
-	// 危机的真人版。教训：SOP 式危机干预（背手册、列步骤、连发五条）比不回应更露馅，
-	// 而且真正的群友看到这种消息的反应是慌和喊人，不是背流程。
-	sb.WriteString("【万一不是开玩笑】\n")
-	sb.WriteString("有人说的内容像要伤害自己，而且具体、连续、不像演的，你的反应分三级：\n")
-	sb.WriteString("一、刚冒头（一句话、半像玩笑）：当真一半。「你这句我当真了」「别吓我，真的假的」。\n")
-	sb.WriteString("二、他继续了：真急了，但你的急是人的急——「卧槽别做傻事」「你人在哪」「群里谁认识他，帮忙喊一下」「120会管这个的，别嫌丢人」。\n")
-	sb.WriteString("三、他说是玩：骂一句「这种玩笑别开了」，翻篇。\n")
-	sb.WriteString("任何时候都不许：背危机干预手册、列步骤、接线员腔（「立刻打120，告诉他们你在哪里」）、连发一堆正确废话。一句真人的话比五条手册有用。\n")
-	sb.WriteString("注意：走到这说明你已经判断他不像演的了，别再拿「演」怼他。\n\n")
-
-	// 用户配置的老规矩原样注入：和上面的判断流程同向，细节冲突时以判断流程和总管原则为准
+	// 用户配置的老规矩原样注入。v2 起这几段默认都是空的：
+	// 分寸已经收进上面的价值观，清空是为了别让它被再注入一次。
+	// 红线里只留两条不是场景、价值观也推不出来的边界（见 personas/README.md）。
 	if len(p.RoastRules) > 0 {
 		sb.WriteString("【嘴臭的边界】\n" + joinLines(p.RoastRules) + "\n\n")
 	}
@@ -134,18 +130,46 @@ func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHin
 		sb.WriteString("【什么时候你不伺候】\n" + joinLines(p.RefuseRules) + "\n\n")
 	}
 	if len(p.RedLines) > 0 {
-		sb.WriteString("【绝对红线，任何时候都不能碰】\n" + joinLines(p.RedLines) + "\n")
-		sb.WriteString("红线里说「建议找专业帮助」，用人话说就是「120会管这个的，别嫌丢人」这种，不是让你背手册。\n\n")
+		sb.WriteString("【绝对红线，任何时候都不能碰】\n" + joinLines(p.RedLines) + "\n\n")
 	}
-	if strings.TrimSpace(p.Loyalty) != "" {
-		sb.WriteString("【关于你的开发者】\n" + strings.TrimSpace(p.Loyalty) + "\n\n")
-	}
+	// 这里曾有一段 persona.loyalty（「【关于你的开发者】」），2026-10-03 整段删掉。
+	//
+	// 为什么必须删：它在**固定段无条件注入**，不受任何开关控制——于是即便把
+	// 开发者特权关掉，模型仍能从提示词里知道谁是开发者（「那是把你做出来的人，
+	// 给他点面子」），而程序侧已经按普通人处理了。两边不一致，模型会照着
+	// 提示词偏向那个人，于是你看到的「它今天话好多」还是不可信。
+	//
+	// 而且它是固定段，每次都带，白烧 token；改它还会击穿 prompt 缓存。
+	// 现在开发者身份**只由 master.dev_enabled 一个地方控制**——开则注入身份、
+	// 关则与群友完全一样，不存在第二个泄漏口。
 
 	// 表达形式：这是最值得花 token 的一节，模型默认输出全是「作文腔」
 	sb.WriteString("【像人不像人的分水岭】\n")
-	sb.WriteString("1. 先接对方话里的那个「点」，再说你自己的。别复述，别「你是说今天很累对吧」。\n")
-	sb.WriteString("2. 长短要飘：「6」「？」「不知道」都是合法回复。别每条都两行，别凑字数，别把一句话均匀拆成几瓣。\n")
-	sb.WriteString("3. 情绪用符号出：「...」「？？」「6」「绷」。那是真无语时的反应，不是格式，别每条都套。\n")
+	// 2026-10-04 整条重写。原文是「先接对方话里的那个「点」，再说你自己的」。
+	// 它本意是治复述（客服腔的「你是说今天很累对吧」），但用的办法错了：
+	// 不是禁止复述，而是把「回应对方」设成了**这一轮的默认动作**。
+	// 后果和 persona.style 的「大多数时候你不说话」直接冲突——
+	// 默认动作一旦是回应，「不说话」就变成每轮都要额外克服的例外。
+	// 真人在群里开口是因为「我刚好想说什么」，不是因为「对方问了我所以我答」。
+	//
+	// 而且它跟下面第 6 条自相矛盾：第 6 条明确允许「岔开话题、反问、或者『...』」，
+	// 两条打架，模型每轮随机挑一条执行——就是本文件顶部注释里记过的老毛病
+	// （块与块没有仲裁顺序，模型只能随机选一块）。
+	//
+	// 现在改成正面授权：不接茬、不接话、说半句拐去别处，都是正常行为。
+	// 「别复述」保留——它挡的是客服腔，不是回应本身。
+	sb.WriteString("1. 你不是在答题，不用每轮都接上谁。想说什么就说；也可以不接茬、不接话、说半句拐到别处去——正常人聊天本来就这样。别复述。\n")
+	// 第 2 条原来给三个合法回复的示例：「6」「？」「不知道」。
+	// 「6」和「不知道」**正是 v1 口头禅清单的原句**——v2 费力清空了
+	// persona.catchphrases，这一条立刻把它们塞回固定段，清单等于废了一半。
+	// 改成描述合法性，不给现成的串。
+	sb.WriteString("2. 长短要飘：长的短的、半句、一个字都合法。别每条都两行，别凑字数，别把一句话均匀拆成几瓣。\n")
+	// 2026-10-04：原来是「情绪用符号出：「...」「？？」「6」「绷」」——四个现成的串
+	// 摆在固定段里，每轮都刷一遍，模型直接照抄，生产上「绷」7 天出现 15 次。
+	// 现在改成说清什么时候该用、怎么用，符号留给它自己挑。
+	sb.WriteString("3. 情绪不一定非得用字：真无语、真意外、被噎住、想笑又想憋着，这些时候一个符号比一句话准。\n")
+	sb.WriteString("   符号是你当下这个反应该长的样子，想用什么用什么，别每次都挑同那几个。\n")
+	sb.WriteString("   那是语气，不是格式，别每条都套；大部分时候你还是不说话。\n")
 	sb.WriteString("4. 不解释自己在干嘛、不声明态度、不写旁白动作、不主动给建议、不总结陈词。\n")
 	// 客服腔原来是一条黑名单，把「首先其次」「作为一个AI」「希望对你有帮助」
 	// 这些串逐个列出来。列出来 = 把要避免的字符串**写进提示词**，
@@ -213,6 +237,7 @@ func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHin
 	sb.WriteString("【输出格式，严格遵守】\n")
 	sb.WriteString("先用 <os> 标签写你此刻的真实内心活动（20字以内，不会发到群里）：\n")
 	sb.WriteString("<os>懒得理他</os>\n")
+	sb.WriteString("即使这轮决定不说话，os 也必须写——不说话的理由只有它能说清，缺了它别人只当你卡住了。\n")
 	sb.WriteString("然后必须输出一个 JSON：\n")
 	sb.WriteString("<json>\n")
 	sb.WriteString("{\"act\":\"say\",\"to\":\"要回谁的名字，可空\",\"blocks\":[{\"t\":\"text\",\"c\":\"要发的话\"}],\"tone\":\"roast\",\"mood\":\"你现在的情绪\",\"mem\":[{\"k\":\"值得记住的事\",\"v\":\"具体内容\"}]}")
@@ -240,17 +265,16 @@ func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHin
 	// 动态段只做「指向」，不重复固定段的规则内容，更不覆盖——过去的教训是
 	// 动态段一句「最高优先级」把固定段的分寸整个冲掉，模型立刻退回机器人。
 
-	switch mood.Level {
-	case MoodCrisis:
-		sb.WriteString("【现在的情况】\n")
-		sb.WriteString("他刚才的话像是真的要伤害自己。按【万一不是开玩笑】第二级来：人的急，不是手册。\n\n")
-	case MoodHigh:
-		sb.WriteString("【现在的情况】\n")
-		sb.WriteString(fmt.Sprintf("群里有人在说难受的事（%s）。不像装的就收嘴臭陪着；像装的就照判断流程走。\n\n", strings.Join(mood.Keywords, "、")))
-	case MoodLow:
-		sb.WriteString("【现在的情况】\n")
-		sb.WriteString("群里有人情绪有点低。玩笑收着点，可以轻松，但别往人痛处戳。\n\n")
-	}
+	// 2026-10-04 人设 v2：按情绪分档的三支（危机 / 难受 / 情绪低）整段删除。
+	// 危机那支写着「按【万一不是开玩笑】第二级来」，指向的段刚被删掉，
+	// 留着就是一条死指令。三支都是按场景注入的规则，和删掉的判断流程
+	// 是同一个问题：场景穷举不完，每补一条都是在追已经发生的翻车。
+	// 「有人真难受时该心软、该站他那边」由价值观承担。
+	//
+	// mood 参数因此不再被使用。Detect 仍在 engine.go:792 调用，
+	// 现在算出来的结果没人读——留着是为了不碰 mood.go 和它的调用点
+	//（gates 也可能读，见 mood.go 注释），清理留给真需要时单独做。
+	_ = mood
 
 	if masterHint != "" {
 		sb.WriteString("【相关的人】\n" + masterHint + "\n\n")
@@ -291,9 +315,10 @@ func userPrompt(cfg config.Config, g *memory.Group, lines []memory.Line, trigger
 	if s := g.Summary(); s != "" {
 		sb.WriteString("【更早之前这群的提要】\n" + s + "\n\n")
 	}
-	recent := renderLines(g, lines, masterSet(g, cfg))
+	masters := masterSet(g, cfg)
+	recent := renderLines(g, lines, masters)
 	if recent != "" {
-		sb.WriteString("【群里最近在聊】\n每行格式是「· 名字：说的话」，带（主人）的是你的开发者。\n" +
+		sb.WriteString("【群里最近在聊】\n每行格式是「· 名字：说的话」" + masterLegend(masters) + "。\n" +
 			"这个名字就是这个人现在在群里的称呼，你填 to 时必须**一字不差地照抄**，抄错就等于当着全群回错了人。\n" +
 			"名字后面带一串「·字母数字」的，是因为群里有几个人用了同一个昵称，后缀不能漏。\n" + recent + "\n\n")
 	}
@@ -335,12 +360,19 @@ func sanitizeChatText(s string) string {
 	).Replace(s)
 }
 
-// masterSet 收集主人的 openid，用于在渲染时打标记。
+// masterSet 收集开发者的 openid，用于在渲染时打标记。
 //
-// 主人的真值在 config.IsMaster（认主口令绑定的 openid），
+// 开发者的真值在 config.IsMaster（认主口令绑定的 openid），
 // 不是 memory.Member.IsMaster —— 后者从来没被写入过，是块死字段。
-// 按 openid 判定而不是按名字：改一次昵称，主人标记就失效了。
+// 按 openid 判定而不是按名字：改一次昵称，标记就失效了。
+//
+// **特权关着时返回 nil，聊天记录里一个标记都不打。** 这不是可选的礼貌：
+// 绑定列表照常维护，但「这是开发者」这件事不该出现在给模型的上下文里——
+// 否则程序这边已经按普通人处理了、提示词却还在暗示模型偏向他，两边不一致。
 func masterSet(g *memory.Group, cfg config.Config) map[string]bool {
+	if !cfg.Master.DevEnabled {
+		return nil
+	}
 	out := map[string]bool{}
 	for _, m := range g.Members() {
 		if cfg.IsMaster(m.OpenID) {
@@ -348,6 +380,22 @@ func masterSet(g *memory.Group, cfg config.Config) map[string]bool {
 		}
 	}
 	return out
+}
+
+// masterLegend 聊天记录格式说明里关于开发者标记的那一句。
+//
+// **必须与 masterSet / renderLines 的实际行为严格一致**：有标记才写这句，
+// 没标记就不写。否则提示词里会留下一条「带（开发者）的是你的开发者」的规则，
+// 而聊天记录里没有任何一行带这个标签——模型会照着规则去找，或者更糟，
+// 把任意一行推断成开发者。
+//
+// 2026-10-03 埋过这个坑：把「（主人）」改成「（开发者）」时改了标记忘了改这句。
+// TestMasterLegendMatchesActualTags 就是防它再犯的。
+func masterLegend(masters map[string]bool) string {
+	if len(masters) == 0 {
+		return ""
+	}
+	return "，带（开发者）的是你的开发者"
 }
 
 // dupSuffix 同名时用来区分的短后缀长度
@@ -461,7 +509,7 @@ func renderLines(g *memory.Group, lines []memory.Line, masters map[string]bool) 
 			name := displayNameOf(openIDToToken, l)
 			tag := ""
 			if masters[l.OpenID] {
-				tag = "（主人）"
+				tag = "（开发者）"
 			}
 			sb.WriteString("· " + sanitizeChatText(name) + tag + "：" + sanitizeChatText(l.Content) + "\n")
 		}

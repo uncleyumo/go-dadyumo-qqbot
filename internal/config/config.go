@@ -94,13 +94,31 @@ type CompactConfig struct {
 	MaxOutTokens   int    `json:"max_out_tokens"`
 }
 
-// MasterConfig 主人（开发者）身份。
+// MasterConfig 开发者身份。
 //
-// 重要限制：QQ 开放平台的回调里只有 openid（member_openid / user_openid），
-// 拿不到真实 QQ 号。所以「认出主人」只能靠 openid 绑定，
-// 绑定途径有二：群里发认主口令、管理端手动指定。QQ 号字段仅供人看。
+// ⚠️ **字段名保留 master 是历史原因**（改动会让现网 config.json 里已绑定的
+// openids 全部失效），但**语义已改为「开发者」**：所有面向人的文案、提示词、
+// 管理端标签都不再使用「主人」这个词。
+//
+// # 认人和特权是两件事
+//
+// **DevEnabled 是总开关，默认关闭。** 关闭时开发者的消息与群友**完全一样**：
+// 不过在线率闸、不豁免预算、不用快节奏、提示词里不标身份。
+// 这个开关是本项目「像人」这个目标的关键——开着它时，作为开发者的人享受
+// 更高的优先级，于是**你看到的「它今天话好多」可能只是它对你话多**，
+// 拿这个有偏的样本去判断行为是查不出问题的。
+//
+// 关闭它**不影响绑定**：认主口令、管理端「设为开发者」照常可用，
+// OpenIDs 列表照常维护。绑定管的是「认得出谁」，开关管的是「区别对待谁」，
+// 两者可以也应该分开。
 type MasterConfig struct {
-	Nickname    string   `json:"nickname"`     // 主人昵称，如「张三」；留空则提示词里只说「你开发者」
+	// DevEnabled 开发者特权总开关。**默认关**。
+	// 关着时开发者的消息和群友一个待遇；开着时它会无条件回应、超预算也照应、
+	// 说话节奏更快，并在提示词里被标出来。切换后已进攒批窗口的那批不受影响
+	// （以消息到达时刻为准），这是正确行为——攒批本来就有 10~18 秒的自然延迟。
+	DevEnabled bool `json:"dev_enabled"`
+
+	Nickname    string   `json:"nickname"`     // 开发者昵称，如「张三」；留空则提示词里只说「你开发者」
 	QQ          string   `json:"qq"`           // 真实 QQ 号，仅作备注展示
 	OpenIDs     []string `json:"openids"`      // 已绑定的 openid 列表
 	BindToken   string   `json:"bind_token"`   // 认主口令，群里发「#认主 <token>」即绑定
@@ -239,16 +257,25 @@ type PersonaConfig struct {
 	// 以下是「活人感」的三块关键约束，缺一个就会退化成问答机器人
 	SilenceRules []string `json:"silence_rules"` // 什么时候该闭嘴
 	RefuseRules  []string `json:"refuse_rules"`  // 什么时候该拒绝（被当工具使唤、恶意调戏）
-	Loyalty      string   `json:"loyalty"`       // 对主人的态度
+	// 这里曾有一个 Loyalty（对开发者的态度），2026-10-03 删掉。
+	// 它在固定段无条件注入，等于开了一个绕过特权的泄漏口：即使把
+	// dev_enabled 关掉，模型仍能从「那是把你做出来的人，给他点面子」里
+	// 知道谁是开发者，而程序侧已按普通人处理——两边不一致，模型会照着
+	// 提示词偏向那个人。开发者身份现在**只由 master.dev_enabled 控制**。
 }
 
 // BrainConfig 决策引擎
 type BrainConfig struct {
-	DailyBudget      int     `json:"daily_budget"`      // 每日 LLM 调用预算
-	ImpulseThreshold float64 `json:"impulse_threshold"` // 发言冲动阈值，越高越沉默
-	MaxHistory       int     `json:"max_history"`       // 短期记忆条数
-	Temperature      float64 `json:"temperature"`
-	MaxOutTokens     int     `json:"max_out_tokens"`
+	DailyBudget  int     `json:"daily_budget"`  // 每日 LLM 调用预算
+	MaxHistory   int     `json:"max_history"`   // 短期记忆条数
+	Temperature  float64 `json:"temperature"`
+	MaxOutTokens int     `json:"max_out_tokens"`
+
+	// 注意：这里曾有一个 ImpulseThreshold（冲动值阈值），
+	// 连同整套权重机制已于 2026-10-03 废除。理由见 internal/brain 的包注释——
+	// 它是在替模型判断「这条值不值得回」，而真人没有这个内心过程。
+	// 现在控制「说不说话」的是 schedule（在线率：「在不在电脑前」），
+	// 剩下的只有静默期、最小发言间隔、每日预算这三道与技术性限流有关的闸。
 
 	// 攒批（debounce）：新消息到了不立刻问模型，先等一小会儿看有没有人接着说。
 	// 这既是「真人反应需要时间」的拟真，也是控制调用次数的最主要手段。
@@ -260,7 +287,18 @@ type BrainConfig struct {
 	// 否则一次请求就能把额度烧穿或直接被上游拒绝。
 	MaxCtxTokens int `json:"max_ctx_tokens"`
 
-	MinSpeakIntervalSec int `json:"min_speak_interval_sec"` // 两次发言之间的最小间隔，防止刷屏
+	// 这里曾有一个 MinSpeakIntervalSec（两次发言的最小间隔），2026-10-03 删掉。
+	//
+	// 它有两个致命问题，删掉比修好更划算：
+	//  1. **它会丢消息**。fire() 在函数开头就把攒批状态清空了（st.newCount=0、
+	//     st.timer=nil），走到这道闸时 return，而 defer 里的补救条件
+	//     `pending && timer==nil && newCount>0` 不成立 → 那批消息彻底消失，
+	//     从来没进过模型。生产实况：17:36:41 进的群消息、17:36:58 被这道闸拦掉。
+	//  2. **与攒批窗口语义重复**。窗口本来就是 10~18 秒，间隔设 15 秒，
+	//     两者几乎相等，叠加后变成「每两轮就可能扔一批」。
+	//
+	// 防刷屏另有三道且都不丢消息：拆句发送的分段延迟、speak.max_segments
+	// 一次最多 N 条、QQ 平台 passiveMaxSends=5 的硬限制。
 
 	// 滚动摘要：每积累这么多条新消息，就把更早的部分压成一段「前文提要」。
 	// 这是让上下文在长期运行下不失控的关键——没有它，历史只会越喂越多，
@@ -272,6 +310,17 @@ type BrainConfig struct {
 	// 图片按 token 计价比文本贵得多（一张普通截图几百到上千 token），
 	// 群里刷图时必须封顶，否则几张图就能吃掉整轮预算。
 	MaxImagesPerCall int `json:"max_images_per_call"`
+
+	// MaxFacts 每个群最多记住多少条长期要点（模型自己写的结论，
+	// 比如「他叫老张，在苏州做监理」）。满了按 LRU 淘汰最旧没被改写的那条。
+	//
+	// 与 MaxHistory（短期原话条数）是**两个独立的池子**，别混在一起算：
+	// 30 条原话和 24 条要点是两回事——前者存「谁说了什么」，后者存「结论」。
+	//
+	// 要点会进提示词，所以它同时占 token 预算。建议 12~30，
+	// 再多容易把模型带跑偏（它会把每条都当成事实）。
+	// 2026-10-03 之前这个上限硬编码在 memory 包里（24），配不了。
+	MaxFacts int `json:"max_facts"`
 
 	// ImageMaxSide 图片长边压缩上限（像素）。
 	// 群里的手机截图动辄 1080×2400、PNG 一两 MB，原图内联纯属烧钱；
@@ -320,25 +369,36 @@ type ScheduleWindow struct {
 // DeepSeek 的错峰半价在 00:30-08:30，正好是群里没人说话的时候；把白天的在线率压到 20%
 // 只会让机器人在你真正在聊的时段装死。所以默认档用 daytime——白天几乎全在线，
 // 凌晨（本来就没人的时候）才降下来，省钱和体感两头都照顾到。
+//
+// ⚠️ 「全天」有两个档，别按名字猜：always 是 0.90（日常档，仍有 10% 概率不接话），
+// always_strict 才是 1.00（调试/特殊场景，任何时候都必应）。
+// 2026-10-03 拆分——之前 always 的显示名是「全天在线」，暗示 100% 实际 0.90。
 type ScheduleConfig struct {
 	Enabled bool   `json:"enabled"`
-	Mode    string `json:"mode"` // daytime / deepseek_offpeak / night_owl / always / random_daily / custom
+	Mode    string `json:"mode"` // daytime / deepseek_offpeak / night_owl / always(0.9) / always_strict(1.0) / random_daily / custom
 	// AtGraceSec 被 @ 之后的实时宽限：这段时间内不再按概率过滤，一律实时回应。
 	// 被人点名了还按概率装死，是最伤体验的。
 	AtGraceSec int `json:"at_grace_sec"`
 	// BaseRate 没命中任何窗口时的在线率。这是「平时活跃度」的总旋钮：
 	// 觉得机器人太安静就调高它，觉得话太多/太费钱就调低。
+	//
+	// ⚠️ 自定义窗口（mode=custom）里把某条 rate 填 0 **不是「关掉这个时段」**，
+	// 而是回落成 BaseRate（未配置时为 0.20）。要真静音得把 BaseRate 也调下去。
 	BaseRate float64          `json:"base_rate"`
 	Windows  []ScheduleWindow `json:"windows"` // 仅 mode=custom 时生效
 }
 
 // GroupConfig 群配置
 type GroupConfig struct {
-	OpenID              string  `json:"openid"`
-	Name                string  `json:"name"`
-	Enabled             bool    `json:"enabled"`
-	MinSpeakIntervalSec int     `json:"min_speak_interval_sec"`
-	ImpulseBias         float64 `json:"impulse_bias"` // 该群冲动值偏置
+	OpenID  string `json:"openid"`
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+
+	// 这里曾有两个字段 GroupMinSpeakIntervalSec 与 ImpulseBias，都是死字段：
+	// 全仓没有任何读取点。ImpulseBias 随冲动值机制一起废掉了；
+	// GroupMinSpeakIntervalSec 则是在 brain.min_speak_interval_sec 也被删掉之后
+	// 才彻底没人读的（2026-10-03）。两个都清干净——留着它们只会让后人以为
+	// 「群里可以单独配一个门限」，然后花时间找它为什么不生效。
 }
 
 // StorageConfig 存储
@@ -423,16 +483,15 @@ func Default() *Config {
 		},
 		Brain: BrainConfig{
 			DailyBudget:         300,
-			ImpulseThreshold:    0.62,
 			MaxHistory:          30,
 			Temperature:         0.95,
 			MaxOutTokens:        400,
 			DebounceSec:         10,
 			DebounceJitterSec:   8,
 			MaxCtxTokens:        4000,
-			MinSpeakIntervalSec: 20,
 			SummaryEvery:        24,
 			MaxImagesPerCall:    3,
+			MaxFacts:            24,
 			ImageMaxSide:        1024,
 			VideoMaxSec:         120,
 			VideoMaxMB:          50,
@@ -528,6 +587,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Brain.MaxImagesPerCall <= 0 {
 		c.Brain.MaxImagesPerCall = 3
+	}
+	// 长期要点上限。<=0 时回落 24（与 memory.MaxFacts 的初值一致）。
+	// 上限不设天花板：要点本身是短文本，token 成本远低于原话，
+	// 而多记几条换来的是「模型知道群里的事」，这个交换划算。
+	if c.Brain.MaxFacts <= 0 {
+		c.Brain.MaxFacts = 24
 	}
 	if c.Brain.ImageMaxSide <= 0 {
 		c.Brain.ImageMaxSide = 1024
@@ -721,8 +786,12 @@ func (s *Store) Rev() int64 {
 	return s.rev
 }
 
-// IsMaster 判断某个 openid 是否为已绑定的主人。
+// IsMaster 判断某个 openid 是否为已绑定的开发者。
+//
+// 注意它只回答「认得出谁」，不回答「要不要给他特权」——那是 Master.DevEnabled
+// 的事。认人与特权分开，是这个开关能存在的前提。
 // 群里回调只给 openid，所以这是「认人」的唯一可靠依据。
+// 无论 DevEnabled 开没开，这个判断都照常工作。
 func (c *Config) IsMaster(openID string) bool {
 	if openID == "" {
 		return false

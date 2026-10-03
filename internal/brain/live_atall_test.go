@@ -53,7 +53,7 @@ func TestLiveAtAllNotLeaked(t *testing.T) {
 
 	system := systemPrompt(cfg, g, MoodSignal{}, "", "", "LV100群主")
 	user := userPrompt(cfg, g, hist,
-		buildTrigger(true, false, false, true, false, 5, "LV100群主", true), "")
+		buildTrigger(true, false, false, true, false, false, false, 5, "LV100群主", true), "")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()

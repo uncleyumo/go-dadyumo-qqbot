@@ -57,6 +57,22 @@ func main() {
 	}
 	cfg := store.Get()
 	logx.Info("配置已加载", "path", *cfgPath, "appid", cfg.QQ.AppID, "sandbox", cfg.QQ.Sandbox)
+	// 档位名不认识时必须显式告警：windowsFor 对未知 mode 是静默回落 daytime 的，
+	// 现场表现只是「话变少了」，没人会想到是档位名写错或被改名。
+	// 校验放在启动时而不是 config.Validate 里，是因为 brain 已 import config，
+	// 反向 import 会成环——这里 main 同时看得见两边。
+	if !brain.KnownScheduleMode(cfg.Schedule.Mode) {
+		logx.Warn("schedule.mode 不认识，将按 daytime 处理",
+			"mode", cfg.Schedule.Mode,
+			"提示", "档位名拼错了，或该档位在某个版本被改名。可用：daytime/deepseek_offpeak/night_owl/always/always_strict/random_daily/custom")
+	}
+	// 长期要点上限从配置写进 memory 包。上限住在 memory 包里是因为淘汰逻辑
+	// 与 facts 同处一地（SetFact 要拿它判断该不该 LRU），而配置在 config 包——
+	// 只能由 main 这个同时看得见两边的地方做交接。
+	//
+	// **必须在建 Engine / 读 memory.json 之前写**，否则加载进来的旧要点
+	// 会按默认值算过一次淘汰统计。
+	memory.MaxFacts = cfg.Brain.MaxFacts
 	// 在线时段落一行日志：重启后能一眼确认档位和当前在线率，不用猜它为什么不说话
 	if rate, label := brain.OnlineRate(cfg.Schedule, time.Now()); cfg.Schedule.Enabled {
 		logx.Info("在线时段调度已启用", "档位", cfg.Schedule.Mode,
@@ -190,6 +206,7 @@ func main() {
 		}
 		// 让管理端改完群记忆能立即落盘，而不是等 5 分钟的周期 flush
 		admin.SetMemoryPersist(func() error { return mem.SaveTo(memPath) })
+		admin.SetMemoryPath(memPath)
 		if memePool != nil {
 			path := memePoolPath
 			admin.SetMemePool(memePool, func() error { return memePool.Save(path) })

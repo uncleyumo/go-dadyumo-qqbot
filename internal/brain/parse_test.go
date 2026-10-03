@@ -162,3 +162,90 @@ func TestLooksLikeSpeech(t *testing.T) {
 		}
 	}
 }
+
+// TestParseDecisionQuietFallbackKeepsOS 降级闭嘴时必须保住 os。
+//
+// 2026-10-03 生产实况：管理端决策日志里，模型选择闭嘴时 os 几乎总是空的，
+// 「它为什么不说话」完全看不出来。根因在 ParseDecision 的第一条降级出口
+// 漏了 OS: os——模型明明写了内心活动，只是 JSON 被截断，那段 os 被丢了。
+// 而紧邻的两条出口都带着，看起来像「这条特意不要」，实际是漏的。
+//
+// 这组用例必须逐条钉住「走的是哪条出口」：只看 os 非空是不够的，
+// 那两条出口本来就会带 os，测不出是不是被别的路径「碰巧」满足
+//（atothers_test.go 批评过这种假绿）。
+func TestParseDecisionQuietFallbackKeepsOS(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in, why string
+	}{
+		// A 类：os 写完就没下文了，os 之后连一个 { 都没有。
+		// 这是最贴近生产的形态——免费小模型经常吐完 os 就撞上 max_tokens。
+		{`<os>懒得理他</os>`, "os 后无任何 JSON"},
+		// A 类边界：json 标签在，但内容是空的
+		{`<os>算了</os><json>`, "json 标签内为空"},
+		// B 类：引号没闭合，braceMatch 与补 } 都配不出来
+		{`<os>怕说错</os><json>{"act":"quiet`, "引号未闭合，JSON 配不出来"},
+	}
+	for _, c := range cases {
+		d, issue := ParseDecision(c.in)
+		// 先确认真的走了降级这条出口，否则下面的断言可能只是在测另一条路
+		if issue != ParseFallback {
+			t.Errorf("ParseDecision(%q) 的 issue 应为 fallback，实际 %q（%s）——"+
+				"这条用例本来是想钉住「剥完什么都不剩」那条出口的，"+
+				"走错分支就等于没测到", c.in, issue, c.why)
+			continue
+		}
+		if d.Act != "quiet" {
+			t.Errorf("ParseDecision(%q) 的 act 应为 quiet，实际 %q", c.in, d.Act)
+		}
+		want := extractTag(c.in, "os")
+		if d.OS != want {
+			t.Errorf("降级闭嘴时 os 被丢了：ParseDecision(%q) 得 %q，期望 %q——"+
+				"「它为什么不说话」在管理端就成了一片空白", c.in, d.OS, want)
+		}
+	}
+}
+
+// TestParseDecisionTruncatedJSONStillKeepsOS 对照组：能捞回 JSON 的截断必须保住 os。
+//
+// 这条和上面那组是同一次事故的两面，必须一起钉：
+// 上面的用例守住「捞不回来时也别丢 os」，这条守住「捞得回来时别把路径改坏」。
+//
+// 尤其注意 {"act":"quiet" 这个带收尾引号的输入——它走的是 extractJSON 里
+// `return body, ParseRecovered` 那条（parse.go:281），今天就能拿到 os。
+// 如果有人「简化」那里（比如改成 body 非空就一律当 fallback），
+// 一批本来正常的轮次会突然掉进降级路径，调用量与行为都会变。
+func TestParseDecisionTruncatedJSONStillKeepsOS(t *testing.T) {
+	t.Parallel()
+	d, issue := ParseDecision(`<os>懒得理他</os><json>{"act":"quiet"`)
+	if issue != ParseRecovered {
+		t.Fatalf("引号闭合的截断 JSON 应被补全成 recovered，实际 %q——"+
+			"这条路径被改坏的话，一批正常轮次会掉进降级出口", issue)
+	}
+	if d.OS != "懒得理他" {
+		t.Errorf("走 recovered 路径时 os 也要保住，实际 %q", d.OS)
+	}
+	if d.Act != "quiet" {
+		t.Errorf("act 应为 quiet，实际 %q", d.Act)
+	}
+}
+
+// TestParseDecisionEmptyInputHasNoOS 整串为空时 os 本来就为空。
+//
+// 这条是**反向**钉住：第 26 行那条出口（text == ""）**不带** os 是对的，
+// 因为 extractTag 在空串上必然返回空。加上 OS: os 只是死代码，
+// 还会让人误以为那条也能捞到 os。此测试把这个判断写死，
+// 免得后人「顺手补齐」时把上面的用例一起推翻。
+func TestParseDecisionEmptyInputHasNoOS(t *testing.T) {
+	t.Parallel()
+	d, issue := ParseDecision("")
+	if issue != ParseFallback {
+		t.Errorf("空输入的 issue 应为 fallback，实际 %q", issue)
+	}
+	if d.OS != "" {
+		t.Errorf("整串为空时 os 必为空，实际 %q", d.OS)
+	}
+	if d.Act != "quiet" {
+		t.Errorf("空输入应闭嘴，实际 act=%q", d.Act)
+	}
+}

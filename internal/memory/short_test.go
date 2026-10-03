@@ -1,5 +1,8 @@
 package memory
 
+// ⚠️ MaxFacts 现在是**包级可变状态**（2026-10-03 从 const 改成 var 以便配置）。
+// 任何改它的测试都必须用 t.Cleanup 改回去，否则会污染同包的其他用例。
+
 import (
 	"encoding/json"
 	"fmt"
@@ -227,5 +230,91 @@ func TestLoadLegacyFactsWithoutTimestamps(t *testing.T) {
 	}
 	if facts["旧要点"] != "旧内容" {
 		t.Errorf("facts 内容被破坏: %v", facts)
+	}
+}
+
+// TestMaxFactsIsSettable 上限可配（2026-10-03 从 const 改成 var）。
+func TestMaxFactsIsSettable(t *testing.T) {
+	old := MaxFacts
+	t.Cleanup(func() { MaxFacts = old })
+	MaxFacts = 3
+	g := NewGroup("g", "群")
+	for i := 0; i < 3; i++ {
+		if ev := g.SetFact(string(rune('a'+i)), "v"); ev != "" {
+			t.Fatalf("第 %d 条不该淘汰（上限 3）: %s", i+1, ev)
+		}
+	}
+	if ev := g.SetFact("d", "v"); ev == "" {
+		t.Fatal("第 4 条应淘汰最旧的一条（上限已设为 3）")
+	}
+	if got := len(g.FactsList()); got != 3 {
+		t.Fatalf("总数应保持 3，got %d", got)
+	}
+}
+
+// TestClearRequiresBackupBeforeSaveTo 守住「清记忆」的落盘顺序。
+//
+// 这条不是洁癖：guardAgainstEmptyOverwrite 存在的目的正是拦住空覆盖，
+// 于是 Clear() 之后直接 SaveTo 会被拒（磁盘 1 群 vs 快照 0 群落进它的判定区间）。
+// 后果是按钮报成功、内存清了、文件没动，进程一重启记忆原样回来。
+//
+// admin.handleMemoryClear 因此必须「备份 → 移走原文件 → Clear → SaveTo」。
+// 这个测试把那两步钉死：只 Clear 不挪文件会被拒，挪走之后就能写成空快照。
+func TestClearRequiresBackupBeforeSaveTo(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "memory.json")
+
+	s := New(4)
+	s.Group("g1", "群一").SetFact("k", "v")
+	s.Group("g2", "群二").SetFact("k", "v")
+	if err := s.SaveTo(path); err != nil {
+		t.Fatalf("首次落盘失败：%v", err)
+	}
+
+	s.Clear()
+	if n := len(s.All()); n != 0 {
+		t.Fatalf("Clear 之后还剩 %d 个群", n)
+	}
+
+	// 不挪文件直接写：必须被守卫拒绝。
+	if err := s.SaveTo(path); err == nil {
+		t.Fatal("空快照直接覆盖原文件居然成功了——守卫失效，清记忆按钮会变成假成功")
+	} else if !strings.Contains(err.Error(), "拒绝覆盖") {
+		t.Fatalf("期望守卫的拒绝覆盖错误，实际：%v", err)
+	}
+
+	// 挪走原文件（备份）之后就能正常写空快照。
+	backup := path + ".bak"
+	if err := os.Rename(path, backup); err != nil {
+		t.Fatalf("备份失败：%v", err)
+	}
+	if err := s.SaveTo(path); err != nil {
+		t.Fatalf("移走原文件后仍写不进空快照：%v", err)
+	}
+
+	// 备份里必须还留着原来的两个群，否则这个「备份」是假的。
+	var back snapshot
+	b, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatalf("读备份失败：%v", err)
+	}
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatalf("备份不是合法 JSON：%v", err)
+	}
+	if len(back.Groups) != 2 {
+		t.Fatalf("备份里群数 = %d，期望 2", len(back.Groups))
+	}
+
+	// 新文件必须是能读回来的空快照（不是 0 字节，0 字节会在下次 LoadFrom 触发隔离）。
+	var cur snapshot
+	b2, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读新文件失败：%v", err)
+	}
+	if err := json.Unmarshal(b2, &cur); err != nil {
+		t.Fatalf("空快照不是合法 JSON：%v", err)
+	}
+	if len(cur.Groups) != 0 {
+		t.Fatalf("新快照里还有 %d 个群", len(cur.Groups))
 	}
 }

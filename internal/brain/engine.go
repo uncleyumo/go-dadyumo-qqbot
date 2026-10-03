@@ -1,12 +1,27 @@
 // Package brain 的调度中枢：把「群里发生了什么」翻译成「要不要说话、说什么、分几条发」。
 //
 // 三条设计主线：
+//
 //  1. 攒批（debounce）——消息不是逐条触发模型，而是攒一小会儿再决定，
 //     既像真人反应需要时间，也是控制调用次数最有效的手段
-//  2. 冲动值（impulse）——用规则先挡掉明显不该开口的情形，
-//     只有值得考虑的才去问模型，省下的都是钱
+//  2. 在线率（schedule）——「这会儿人在不在电脑前」，这是唯一的内容无关闸门。
+//     人不会每条消息都回，因为人有时候就没在看屏幕；要随机数只是为了省调用，
+//     不是为了替模型判断「值不值得回」
 //  3. 硬预算——每日调用次数与上下文 token 双重封顶，
 //     免费娱乐项目的第一要务是不失控
+//
+// 2026-10-03 变更：这里曾有第二条主线「冲动值（impulse）」，整套已被废除。
+// 它用一堆权重算出 0~1 的分数、再和阈值比较，用来决定「这条值不值得回」。
+// 废除理由（生产实况，见 README）：
+//   - 误杀率极高。某群 25 条消息里 18 条被它拦下，冲动值恒定 0.25、阈值 0.40，
+//     差的那 0.15 是「他这条消息里有没有带问号」——这不是人心，这是撞运气。
+//   - 更根本的是它在**替模型编造事实**：没 @ 就不等于不是发给机器人的，
+//     群友发一张调侃机器人的表情包，那可能就是发给它的。
+//     而 trigger 是裸拼接进系统提示词的（见 prompt.go），
+//     模型无法区分「这是真的」和「这是程序猜的」，只会相信系统提示词。
+//
+// 现在的分工很清楚：程序管**频率**（在不在电脑前 / 成本 / 别连着刷屏），
+// 模型管**选择**（这次说不说）。后者才是「像人」的部分。
 package brain
 
 import (
@@ -186,9 +201,18 @@ type groupState struct {
 	question   bool
 	replyToBot bool
 	newCount   int
-	impulse    float64
-	reasons    []string
 	firing     bool
+
+	// faceSpam：本批里全是纯表情、没有一个字。
+	//
+	// 2026-10-03 起它**不再拦下这一批**，只作为一条事实写进 trigger
+	// （见 buildTrigger）。原来是「硬闸 + 扣冲动值」双保险，
+	// 扣分那套随冲动值机制一起废了，硬闸则是因为它防的是假线索、
+	// 而假线索的病根（trigger 只说「某某刚在群里说了话」）已直接改掉。
+	//
+	// 为什么该让模型自己看：群里连发八个「666」，一个真人看到也可能接一句
+	// 「你复读机啊」。刷屏不等于没人搭理。
+	faceSpam bool
 
 	// 本批的「主触发者」——@ 它、或者叫它名字的那个人。
 	// 没有它，trigger 只能说「有人 @ 了你」，模型不知道该回谁，
@@ -204,19 +228,15 @@ type groupState struct {
 	// atOthers：本批里有人明确 @ 了别人（@给的不是机器人）。
 	//
 	// 为什么要单记：群里的常态是「A 说话、顺手 @ B 让他答」。
-	// 那种对话跟机器人没关系，插进去就是抢话——2026-10-01 实况：
-	// 有人 @ 了另一位群友（群名片写着「多端智能体」，只是个昵称），
-	// 机器人没被 @，却因为「群里有闲聊 + 攒够一批」凑到 0.40 挤过门限，
-	// 抢着回了一句。
+	// 那种对话跟机器人没关系，但**这个判断只能交给模型**：
+	// 2026-10-01 实况曾在这里扣掉 0.50 冲动值来压制抢话，
+	// 2026-10-03 起改成把「他 @ 的是别人不是你」这条**事实**写进 trigger，
+	// 让模型自己看着办——比扣分有效，因为它看到的是真事而不是被压低的分数。
 	//
-	// 这里只降冲动值、不做硬闸：抢话和「恰到好处的接话」只差一个量，
-	// 机械地一刀切会把合法的插话也毙掉，交给阈值继续权衡。
+	// 「@ 的是别人」有时反而是在叫它（机器人有别名、或群里人就是这么叫的），
+	// 程序无从判断，所以不猜。
 	// 判断依据只有平台的 mentions 数组，与对方是人还是机器人无关。
 	atOthers bool
-
-	// faceSpam：本批里全是纯表情、没有一个字。
-	// 刷屏不是对话，不该触发插话。
-	faceSpam bool
 
 	// pendingFire：上一轮 fire 还在跑时又攒了新消息。
 	// 早退时置位，等当前这轮结束时补跑一次，否则这批消息永远不会被处理。
@@ -273,6 +293,23 @@ func (e *Engine) OnMessage(ev *Event) {
 	}
 
 	isMaster := cfg.IsMaster(ev.OpenID)
+	// isDev = 「这批里有开发者，且开发者特权开着」。
+	//
+	// **一个变量，六个特权。** 下游全部只读 st.fromMaster / 这个 isDev：
+	//   - fire() 的在线率豁免（跳过关门）
+	//   - allowCall 的预算豁免与超预算兜底
+	//   - eager 的快节奏发（不等 first_delay）
+	//   - buildTrigger 的「是你的开发者」case
+	//   - recordTrigger 的触发者归属（决定提示词里【这轮你要回的是】写谁）
+	//   - decide 的 masterHint（「给他面子」）
+	//
+	// 过去它们散落在 fire() 的几个 if 与两个函数的 case 里，加第 7 处时没人
+	// 记得回去补。把开关收敛在这里，st.fromMaster 从此意味着
+	// 「有开发者的消息**且特权已开**」，而不是「有开发者的消息」。
+	//
+	// isMaster 本身保留（不受开关影响）：handleBind 的去重、绑定列表管理
+	// 都靠它——**认人和特权是两件事**，关掉特权不该让人认不出谁。
+	isDev := isMaster && cfg.Master.DevEnabled
 	g.TouchMember(ev.OpenID, ev.Name)
 	// OpenID 一起存：昵称会改、会撞名，身份只能靠 openid。
 	g.Append(memory.Line{
@@ -298,42 +335,23 @@ func (e *Engine) OnMessage(ev *Event) {
 
 	st := e.stateOf(ev.GroupID)
 	st.mu.Lock()
-	// 纯表情/纯附件的连发是刷屏，不是在跟它说话。
-	// 图片刷屏有 imgSpamCount 兜着，表情走的是正文文本路径、完全绕过那个机制，
-	// 结果连发 8 个表情就把攒批条数顶上去、推高冲动值、挤进门限发言——
-	// 2026-10-01 实况：没被 @ 也回了两句（「表情包批发呢你」「有事说事，别光发图」）。
-	// 这里单独记一笔，后面不把它算进「攒了一批」和「群里有闲聊」。
+	// 纯表情/纯附件的连发**不再拦下这一批**，只记一笔，之后作为事实写进
+	// trigger 交给模型自己判断（见 buildTrigger）。
+	//
+	// 2026-10-03 之前这里是「扣冲动值 + 硬闸」双保险。扣分随冲动值整套废了；
+	// 硬闸也删了，因为它防的其实是**假线索**——过去 trigger 只说
+	// 「某某刚在群里说了话」，程序等于替模型断言「有人在跟你说话」。
+	// 群友发一张调侃机器人的表情包，那可能就是发给它的；
+	// 群里连发八个「666」，真人看到也可能接一句「你复读机啊」。
+	// 机械跳过才是错的：这种话程序根本判断不了，只有模型能。
 	onlyFaces := IsOnlyPlaceholders(content) && len(ev.Images) == 0 && len(ev.Videos) == 0
 	st.newCount++
 	st.recordAtOthers(ev.AtMe, ev.MentionTarget != "" && !ev.AtMe && !nameCalled)
-	// 攒批条数在这里才已知：最后一条消息的冲动值把整批的热闹程度算进去
-	imp := ComputeImpulse(ImpulseInput{
-		AtMe:        ev.AtMe,
-		NameCalled:  nameCalled,
-		Question:    question,
-		ReplyToBot:  replyToBot,
-		FromMaster:  isMaster,
-		Chatter:     true,
-		NewCount:    st.newCount,
-		Consecutive: g.Consecutive(),
-		SinceSpeak:  g.SinceLastSpeak(),
-		Idle:        0,
-	})
-	if onlyFaces {
-		// 刷屏不该是「值得插一句」的热闹。把这两项抹掉，只留下真正的触发理由。
-		// 但被 @ / 被叫名字 / 在提问时照常回——用户 @ 完只发一个表情，
-		// 那也是明确在叫它，不该被当成刷屏忽略掉。
-		if !ev.AtMe && !nameCalled && !question && !replyToBot {
-			imp.Score -= wChatter + wManyNew
-			if imp.Score < 0 {
-				imp.Score = 0
-			}
-			imp.Reasons = append(imp.Reasons, "对方在刷表情，不是跟你说话")
-			st.faceSpam = true
-		}
+	if onlyFaces && !ev.AtMe && !nameCalled && !question && !replyToBot {
+		st.faceSpam = true
 	} else {
-		// 这一批里混进了有实质内容的消息。刷屏标记必须撤销——
-		// 不撤销的话「连发七个表情 + 一句正经话」会被当成纯刷屏给毙掉。
+		// 混进了有实质内容、或有人在明确叫它。刷屏标记必须撤销——
+		// 不撤销的话「连发七个表情 + 一句正经话」会被当成纯刷屏。
 		st.faceSpam = false
 	}
 	if ev.AtMe {
@@ -342,13 +360,13 @@ func (e *Engine) OnMessage(ev *Event) {
 	if nameCalled {
 		st.nameCalled = true
 	}
-	if isMaster {
+	if isDev {
 		st.fromMaster = true
 	}
 	if ev.AtAll {
 		st.atAll = true
 	}
-	st.recordTrigger(g, ev.OpenID, ev.Name, ev.AtMe, nameCalled, isMaster, ev.MentionTarget)
+	st.recordTrigger(g, ev.OpenID, ev.Name, ev.AtMe, nameCalled, isDev, ev.MentionTarget)
 	if question {
 		st.question = true
 	}
@@ -374,19 +392,13 @@ func (e *Engine) OnMessage(ev *Event) {
 		}
 	}
 	registerQuoted(st, ev.Quoted, ev.QuotedAuthor, ev.QuotedAuthorOpenID)
-	if imp.Score > st.impulse {
-		st.impulse = imp.Score
-		st.reasons = imp.Reasons
-	}
-	st.applyBatchPenalties()
 	if st.firstAt.IsZero() {
 		st.firstAt = time.Now()
 	}
 	e.scheduleLocked(st, cfg, ev.GroupID)
 	st.mu.Unlock()
 
-	logx.Debug("消息已登记", "group", ev.GroupID, "from", ev.Name, "at", ev.AtMe,
-		"impulse", fmt.Sprintf("%.2f", imp.Score), "攒批", st.newCount)
+	logx.Debug("消息已登记", "group", ev.GroupID, "from", ev.Name, "at", ev.AtMe, "攒批", st.newCount)
 }
 
 // addImages 按发送人归拢本批的图片。同一个人重复发的同一张图不重复记。
@@ -495,30 +507,6 @@ func (st *groupState) recordAtOthers(atMe, atOthers bool) {
 	}
 }
 
-// applyBatchPenalties 在**批次层面**统一压分。调用方必须持有 st.mu。
-//
-// 为什么必须在这里、而不能扣在单条消息上：st.impulse 取的是整批最高分
-// （`if imp.Score > st.impulse`）。给「@ 别人」那条消息单独扣分，
-// 攒批窗口里后面跟的两句闲聊（各 0.25）会把分数盖回来，
-// 于是 0.25+0.15-0.50 → 0，仍 ≥ 0.40 阈值，机器人照样抢话。
-// 2026-10-01 实况就是这样抢了一句「煮面呢 咋了」。
-//
-// 抢话是整批的性质，不是某一条消息的性质，所以扣分必须发生在合计之后。
-func (st *groupState) applyBatchPenalties() {
-	if !st.atOthers {
-		return
-	}
-	// 被 @ / 被叫名字 / 主人说话时，那段对话是顺带的，不该被压
-	if st.atMe || st.nameCalled || st.fromMaster {
-		return
-	}
-	st.impulse += pAtOthers
-	if st.impulse < 0 {
-		st.impulse = 0
-	}
-	st.reasons = append(st.reasons, "有人在跟别人说话")
-}
-
 // recordTrigger 记下本批的「主触发者」。调用方必须持有 st.mu。//
 // 攒批窗口里好几个人各说各的，这一个 openid 同时决定了模型「在回谁」和
 // 发送层「把回复挂给谁」——认错人就是这里没记对。
@@ -600,8 +588,6 @@ func (e *Engine) fire(groupID string) {
 	question := st.question
 	replyToBot := st.replyToBot
 	newCount := st.newCount
-	impulse := st.impulse
-	reasons := st.reasons
 	images, imgSpamNote, imgWhoNote := st.pickImages()
 	quoted := st.quoted
 	quotedAuthor := st.quotedAuthor
@@ -612,7 +598,7 @@ func (e *Engine) fire(groupID string) {
 	atAll := st.atAll
 	atOthers := st.atOthers
 	faceSpam := st.faceSpam
-	// eager = 「有人在等这条回复」。被 @ / 被叫名字 / 主人说话这三种对节奏的
+	// eager = 「有人在等这条回复」。被 @ / 被叫名字 / 开发者说话这三种对节奏的
 	// 要求完全一样：晚几秒群友就当你掉线了。合成一个布尔，是为了让下游
 	// （deliver / segDelay）只需要知道「急不急」，不必知道「为什么急」。
 	//
@@ -621,7 +607,7 @@ func (e *Engine) fire(groupID string) {
 	eager := atMe || nameCalled || fromMaster
 	// 清空攒批，后续新消息会重新起一轮
 	st.atMe, st.nameCalled, st.fromMaster, st.question, st.replyToBot = false, false, false, false, false
-	st.newCount, st.impulse, st.reasons = 0, 0, nil
+	st.newCount = 0
 	st.imgSenders, st.quoted, st.videos, st.voices = nil, "", nil, nil
 	st.quotedAuthor, st.quotedAuthorOpen = "", ""
 	st.triggerOpenID, st.triggerName, st.atAll = "", "", false
@@ -643,13 +629,26 @@ func (e *Engine) fire(groupID string) {
 		st.mu.Unlock()
 	}()
 
-	// 下面这六道闸过去全是 logx.Debug，而生产默认 Info —— 一条都看不见。
+	// 下面这四道闸过去全是 logx.Debug，而生产默认 Info —— 一条都看不见。
 	// 「群里毛也不回，我不知道为什么」就是这么来的：不是没记录，是记录了看不见。
-	//
 	// 所以全部提到 Info 并归入 decision 分类，同时**补齐缺失的参数**：
-	// 光说「冲动值不足」没有用，得看得到「0.35 < 0.40，差 0.05」；
 	// 光说「不在在线时段」更没用——那是个概率判定，同一时刻下次可能就中了，
 	// 必须把本次摇到的数和当时的阈值都记下来（见 schedule.go 的 ScheduleDecision）。
+	//
+	// 2026-10-03：这里曾有六道，冲动值门限与刷屏硬闸已被废除。
+	// 废除的理由见 buildTrigger 与 schedule.go 的注释——简言之，
+	// 它们是在替模型判断「这话值不值得回」，而真人没有这个内心过程：
+	// 人要么看见了想回就回，要么人不在电脑前没看见。
+	// 留在后面的四道都不含这种判断：静默期是你自己点的，
+	// 在线率是「在不在电脑前」，预算是技术性限流。
+	//
+	// 2026-10-03 删掉了第四道「最小发言间隔」。两个理由：
+	//  1. **它会丢消息**——走到这道闸时 fire() 已在函数开头清空了攒批状态
+	//     （st.newCount=0、st.timer=nil），return 之后 defer 里那条
+	//     `pending && timer==nil && newCount>0` 的补救条件不成立，
+	//     那批消息就彻底消失了，从没进过模型。
+	//  2. 与攒批窗口语义重复——窗口本就是 10~18 秒，间隔设 15 秒。
+	// 防刷屏另有三道且都不丢消息：分段延迟、max_segments、平台 5 次上限。
 
 	if muted := g.MutedUntil(); time.Now().Before(muted) {
 		logx.InfoCat(logx.CatDecision, "跳过：该群处于静默期",
@@ -658,30 +657,18 @@ func (e *Engine) fire(groupID string) {
 		return
 	}
 
-	// 冲动值门限：被 @ 或主人说话时无条件放行，其余按阈值
-	if !atMe && !fromMaster && impulse < cfg.Brain.ImpulseThreshold {
-		logx.InfoCat(logx.CatDecision, "跳过：冲动值不足",
-			"group", groupLabel(g), "冲动", fmt.Sprintf("%.2f", impulse),
-			"阈值", fmt.Sprintf("%.2f", cfg.Brain.ImpulseThreshold),
-			"差", fmt.Sprintf("%.2f", cfg.Brain.ImpulseThreshold-impulse),
-			"构成", strings.Join(reasons, "+"), "本批条数", newCount)
-		return
-	}
-
-	// 刷屏硬闸：整批只有表情、一个字都没有，且没有任何明确叫它的理由。
-	// 光靠冲动值还不够——攒批窗口里只要混进一条别的消息，阈值就被顶过去了，
-	// 于是「连发八个表情 + 顺带一句闲聊」还是会插嘴。这里是最后一道。
-	if faceSpam && !atMe && !fromMaster {
-		logx.InfoCat(logx.CatDecision, "跳过：整批只有表情，没人在跟它说话",
-			"group", groupLabel(g), "条数", newCount,
-			"冲动", fmt.Sprintf("%.2f", impulse))
-		return
-	}
-
 	// 在线时段：非 @ 的闲聊按当前时段概率放行。
-	// 这是省钱主力——白天（非半价）只留两成在线率，@ 与宽限期内不受影响。
+	// 2026-10-03 起这是唯一的频率闸——它答的是「这会儿人在不在电脑前」，
+	// 而这正是真人的真实状态。要随机数只是为了省调用，不是决定「值不值得回」。
+	//
+	// atMe 必须传 atMe || nameCalled，不能只传 atMe：上面 MarkAtHit() 对
+	// 「@ 机器人」和「直接叫它名字」一视同仁地开了宽限期，这里却只给 @ 放行，
+	// 叫名字就只能吃宽限、拿不到无条件应——同一个「有人在叫你」，两套待遇。
 	if !atMe && !fromMaster && !strings.HasPrefix(groupID, c2cPrefix) {
-		d := ScheduleDecide(cfg.Schedule, time.Now(), false, false, g.SinceAtHit())
+		// roll 必须在这里生成并复用，日志里记的得是实际参与比较的那个数。
+		// 分两次生成的话，日志里的「摇到」与实际判定无关，排查就成了猜。
+		roll := rand.Float64()
+		d := ScheduleDecide(cfg.Schedule, time.Now(), atMe || nameCalled, false, g.SinceAtHit(), roll)
 		if !d.Allowed {
 			logx.InfoCat(logx.CatDecision, "跳过：本次摇骰子没上线",
 				"group", groupLabel(g), "摇到", fmt.Sprintf("%.3f", d.Roll),
@@ -690,23 +677,15 @@ func (e *Engine) fire(groupID string) {
 		}
 	}
 
-	// 最小发言间隔：防止它自己连着刷屏
-	minGap := time.Duration(cfg.Brain.MinSpeakIntervalSec) * time.Second
-	if d := g.SinceLastSpeak(); d < minGap && !atMe {
-		logx.InfoCat(logx.CatDecision, "跳过：距上次发言太近",
-			"group", groupLabel(g), "距上次", d.Truncate(time.Second).String(),
-			"要求", minGap.String(), "还差", (minGap - d).Truncate(time.Second).String())
-		return
-	}
-
-	// 预算：超了就只对主人和被 @ 的情况放行
+	// 预算：超了就只对被 @ 的情况放行。
+	// 开发者特权已由 OnMessage 的 isDev 统一折进 fromMaster，这里不必再单独判。
 	if !e.allowCall(cfg, atMe, fromMaster) {
 		logx.WarnCat(logx.CatDecision, "跳过：今日预算已用尽",
 			"group", groupLabel(g), "预算", cfg.Brain.DailyBudget)
 		return
 	}
 
-	// 视频/语音处理放在所有闸门之后：冲动值不够、预算用尽、静默期都不该为它花流量。
+	// 视频/语音处理放在所有闸门之后：在线率没摇中、预算用尽、静默期都不该为它花流量。
 	// 用独立 ctx 而不是 decide 的 60s——下载+ffmpeg+转写可能要几十秒，
 	// 不能挤占模型调用的超时预算。
 	var videoFrames []string
@@ -724,14 +703,8 @@ func (e *Engine) fire(groupID string) {
 		vcancel()
 	}
 
-	trigger := buildTrigger(atMe, nameCalled, fromMaster, question, replyToBot, newCount, triggerName, atAll)
-	// 话头不在自己身上时，把这件事如实告诉模型。只靠压低冲动值不够：
-	// 冲动值过了门限之后模型看到的是「有人刚在群里说了话」，
-	// 很容易当成有人在跟它说话而插嘴。2026-10-01 实况就是这样抢了一句。
-	if atOthers {
-		trigger += "；这批里有人在明确 @ 别人，那段对话不是跟你说的"
-	}
-	e.decide(cfg, g, trigger, triggerOpenID, triggerName, atMe, fromMaster, reasons, impulse,
+	trigger := buildTrigger(atMe, nameCalled, fromMaster, question, replyToBot, faceSpam, atOthers, newCount, triggerName, atAll)
+	e.decide(cfg, g, trigger, triggerOpenID, triggerName, atMe, fromMaster,
 		images, imgSpamNote, imgWhoNote, quoted, quotedAuthor, videoFrames, mediaNote, eager)
 }
 
@@ -788,7 +761,7 @@ func (e *Engine) rollDayLocked() {
 }
 
 // decide 构造提示词 → 调模型 → 解析 → 发送
-func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpenID, triggerName string, atMe, fromMaster bool, reasons []string, impulse float64, images []string, imgSpamNote, imgWhoNote, quoted, quotedAuthor string, videoFrames []string, mediaNote string, eager bool) {
+func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpenID, triggerName string, atMe, fromMaster bool, images []string, imgSpamNote, imgWhoNote, quoted, quotedAuthor string, videoFrames []string, mediaNote string, eager bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -821,7 +794,7 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 	masterHint := ""
 	if fromMaster {
 		// 用本轮实际发言者的名字，不用配置里的昵称常量：
-		// 群昵称随时能改，配置里的昵称只会让模型把别人认成主人。
+		// 群昵称随时能改，配置里的昵称只会让模型把别人认成开发者。
 		masterHint = fmt.Sprintf("刚刚叫你的这个人叫%s（你在配置里记住的开发者昵称是%s），给他面子。",
 			orDefault(triggerName, "不知道"), orDefault(cfg.Master.Nickname, "你开发者"))
 	}
@@ -926,14 +899,35 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 
 	dec, issue := ParseDecision(res.Content)
 
-	switch {
-	case issue == ParseNoise:
+	// 告警覆盖**所有**降级出口。过去这里只有「fallback+say」一条，
+	// 而 parse.go 里「剥完标签什么都不剩」那条出口的 act 恒为 quiet，
+	// 于是最该被看见的那一类（模型想说、又没给出可解析的 JSON）
+	// 恰好一条都不响——静默失联，raw 也不记，只能在决策日志里看到一个空 os。
+	//
+	// 用 switch issue 而不是在 case 里筛 act：结构上排除与 ParseNoise 重复，
+	// 不用再加 `&& issue != ParseNoise` 这种防御条件。
+	// 保留 dec.Act == "say" 只用来选措辞，不再用它决定**要不要报警**。
+	//
+	// 全部归 CatDecision：这个分类的定义（见 logx/log.go）就是「为什么说话/
+	// 为什么闭嘴的全部」，且它是唯一被强制持久化进统计库的分类。
+	// 归到 runtime 的话管理端默认视图（筛 decision）根本看不到这些告警。
+	switch issue {
+	case ParseNoise:
 		// 剥完标签剩下的还是协议残渣（比如模型被 max_tokens 截断在 `<json` 上），
 		// 历史上这里会把字面量 `<json` 当发言发进真人群，必须留一条可见的日志。
-		logx.Warn("模型输出是协议残渣，已拦下不发", "group", groupLabel(g), "raw", truncate(res.Content, 80))
-	case issue == ParseFallback && dec.Act == "say":
-		// 拿不到 JSON 时把原文当发言，风险是它可能把内心 OS 也发出去了
-		logx.Warn("未解析到合法 JSON，已降级为直接发言", "group", groupLabel(g), "raw", truncate(res.Content, 60))
+		logx.WarnCat(logx.CatDecision, "模型输出是协议残渣，已拦下不发",
+			"group", groupLabel(g), "raw", truncate(res.Content, 80))
+	case ParseFallback:
+		if dec.Act == "say" {
+			// 拿不到 JSON 时把原文当发言，风险是它可能把内心 OS 也发出去了
+			logx.WarnCat(logx.CatDecision, "未解析到合法 JSON，已降级为直接发言",
+				"group", groupLabel(g), "raw", truncate(res.Content, 60))
+		} else {
+			// 剥完标签什么都不剩：os 还在（模型确实写了内心活动），
+			// 但 act 是解析器替它猜的。必须留痕，否则这轮「为什么哑了」无从查起。
+			logx.WarnCat(logx.CatDecision, "未解析到合法 JSON，模型只说了 os 就没有下文，已按闭嘴处理",
+				"group", groupLabel(g), "raw", truncate(res.Content, 60), "os", truncate(dec.OS, 40))
+		}
 	}
 
 	// 记住它想记住的东西
@@ -967,12 +961,21 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 	}
 	// os 是模型自己写的内心活动（不发送）。它能让你看出它当时在想什么——
 	// 「懒得理他」和「怕说错」是完全不同的两种闭嘴。
-	logx.InfoCat(logx.CatDecision, "决策已得出",
+	//
+	// 「解析」不是 ok 时，act 是解析器替模型猜的（parse.go 三条降级出口都
+	// 硬编码了 Act），必须标出来——否则管理端看到 act=quiet 分不清
+	// 「它自己决定闭嘴」和「它压根没说出话」。这两种情况的处置完全不同。
+	// 值用中文短语而不是 true/false：管理端直接显示 kv，用户要一眼看懂。
+	kv := []any{
 		"group", groupLabel(g), "act", dec.Act, "结果", outcome,
 		"model", res.Model, "os", truncate(dec.OS, 40),
-		"冲动", fmt.Sprintf("%.2f", impulse), "理由", strings.Join(reasons, "+"),
 		"耗时ms", time.Since(start).Milliseconds(),
-		"解析", string(issue), "轮数", rounds)
+		"解析", string(issue), "轮数", rounds,
+	}
+	if issue == ParseFallback || issue == ParseNoise {
+		kv = append(kv, "act来源", "解析器猜的")
+	}
+	logx.InfoCat(logx.CatDecision, "决策已得出", kv...)
 
 	if dec.Act != "say" || !hasContent {
 		// 收图与发不发言无关：闭嘴那轮照样可能看见一张值得留的梗图。
@@ -1453,7 +1456,8 @@ func groupLabel(g *memory.Group) string {
 // 攒批窗口 8 秒加 LLM 调用（实测均延迟 4.4 秒）决定了首字最快也在 12 秒后，
 // 那几百毫秒淹没在里面。条与条之间的间隔才是「像不像人在打字」的判据。
 //
-// eager：被 @ / 被叫名字 / 主人说话时群友在等，整体提前（见 SpeakConfig.EagerScale）。
+// eager：被 @ / 被叫名字 / 开发者说话时群友在等，整体提前（见 SpeakConfig.EagerScale）。
+// 开发者这一路已由 OnMessage 的 isDev 折进 fromMaster，特权关着时不会触发。
 //
 // idx/total：第几条到第几条（共 total 条）。真人连着发消息是越说越快的——
 // 前面慎重、后面连发。固定间隔下 5 条 × 2.6 秒 = 13 秒，观感是「一条一条
@@ -1554,8 +1558,8 @@ func (e *Engine) Stats() DailyStat {
 
 // handleBind 处理认主口令。
 //
-// 安全语义：主人只有第一个绑上的人。口令是明文发在群里的，
-// 任何翻聊天记录的人都能拿到，所以「已有主人时一律拒绝并回骂」，
+// 安全语义：开发者只有第一个绑上的人。口令是明文发在群里的，
+// 任何翻聊天记录的人都能拿到，所以「已有人时一律拒绝并回骂」，
 // 口令错误也回骂——被冒认的企图本身就该怼回去。
 func (e *Engine) handleBind(cfg config.Config, ev *Event) {
 	fields := strings.Fields(ev.Content)
@@ -1571,15 +1575,15 @@ func (e *Engine) handleBind(cfg config.Config, ev *Event) {
 		return
 	}
 	if len(cfg.Master.OpenIDs) > 0 {
-		logx.Warn("已有人绑定主人，拒绝新的绑定", "group", ev.GroupID, "from", ev.Name, "openid", ev.OpenID)
-		e.replyOne(ev.GroupID, ev.OpenID, "主人已经有人当了，轮不到你")
+		logx.Warn("已有人绑定开发者，拒绝新的绑定", "group", ev.GroupID, "from", ev.Name, "openid", ev.OpenID)
+		e.replyOne(ev.GroupID, ev.OpenID, "开发者已经有人当了，轮不到你")
 		return
 	}
 	if _, err := e.store.BindMaster(ev.OpenID); err != nil {
-		logx.Error("绑定主人失败", "err", err.Error())
+		logx.Error("绑定开发者失败", "err", err.Error())
 		return
 	}
-	logx.Info("已绑定主人", "openid", ev.OpenID, "name", ev.Name)
+	logx.Info("已绑定开发者", "openid", ev.OpenID, "name", ev.Name)
 	e.replyOne(ev.GroupID, ev.OpenID, "记住你了")
 }
 
@@ -1604,13 +1608,39 @@ func (e *Engine) looksLikeReplyToBot(g *memory.Group, content string) bool {
 	return d > 0 && d < 3*time.Minute
 }
 
-// buildTrigger 生成给模型看的「这次为什么叫你」。
+// buildTrigger 生成给模型看的「这轮群里发生了什么」。
+//
+// # 铁律：只陈述客观事实，不下任何结论
+//
+// 这条铁律是被坑出来的。trigger 是**裸拼接**进系统提示词的（见 prompt.go
+// 的 userPrompt），模型无法区分「这是真的」和「这是程序猜的」，
+// 而它更愿意相信系统提示词。所以凡是程序的主观判断写进来，
+// 模型就会拿它当推理前提——比不写更糟。
+//
+// 栽过两次：
+//
+//  1. 过去 default 分支只说「某某刚在群里说了话」。但**没 @ 不等于不是
+//     发送给它的**——群友发一张调侃机器人的表情包，那可能就是发给它的。
+//     程序却先替模型判定「这只是群友闲聊」。2026-10-01 实况：有人连发 8 个
+//     表情，被程序编了「攒了一批新消息」的假理由顶过冲动值门限，
+//     模型据此抢了两句「表情包批发呢你」。
+//
+//  2. 想过改成「没人在跟你说话」来解释刷屏——**更毒**。这是把主观猜测
+//     伪装成客观事实，模型会据此推断「所以我不该理」，直接把它想说的话灭掉。
+//     刷屏只陈述「发了 8 个表情，一个字都没有」，剩下的让模型自己判断：
+//     群里连发八个「666」，一个真人看到也可能接一句「你复读机啊」。
+//
+// 换句话说：**程序知道什么就说什么，不知道的就别猜。**
+// 真正的「该不该理这批消息」交给模型——那才是「像人」的部分。
 //
 // who 是本轮触发者的昵称——必须报出名字，不能只说「有人」。
 // 以前这里全是「有人 @ 了你」「有人在问问题」，模型只能自己从上下文里猜
 // 是在回谁，攒批窗口里好几个人各说各的时就必然猜错。
-func buildTrigger(atMe, nameCalled, fromMaster, question, replyToBot bool, newCount int, who string, atAll bool) string {
-	who = strings.TrimSpace(who)
+func buildTrigger(atMe, nameCalled, fromMaster, question, replyToBot, faceSpam, atOthers bool,
+	newCount int, who string, atAll bool) string {
+	// 昵称是用户可控文本，昵称里带「【】」或换行就能把提示词的结构冲掉。
+	// 与 renderLines 对群友正文做的消毒是同一套，见 prompt.go。
+	who = sanitizeChatText(strings.TrimSpace(who))
 	if who == "" {
 		who = "有人"
 	}
@@ -1623,15 +1653,36 @@ func buildTrigger(atMe, nameCalled, fromMaster, question, replyToBot bool, newCo
 	case fromMaster:
 		parts = append(parts, who+"是你的开发者，他说话了")
 	case question:
+		// 「在问问题」是**可从文本验证的客观描述**（LooksLikeQuestion 判的），
+		// 不是「这话在问你」的猜测。注意问句不等于问机器人——
+		// 触发词表很宽，「你懂吗」也会命中，模型仍要自己判断这话是问谁。
 		parts = append(parts, who+"在问问题")
 	case replyToBot:
-		parts = append(parts, who+"在接你刚才的话")
+		parts = append(parts, "你上一句刚说完，"+who+"紧接着发言")
+	case faceSpam:
+		// 只说「发了什么」，不解释「这是刷屏」也不说「没人理你」。
+		parts = append(parts, who+"这批发的是表情或图片，一个字都没有")
 	default:
-		parts = append(parts, who+"刚在群里说了话")
+		// **不加任何判断**。原来这里写的是 who+"刚在群里说了话"——
+		// 那等于程序替模型断言「有人在跟你说话」，而它未必。
+		// 攒批窗口里新消息进来了，这是唯一可以确定的事。
+		parts = append(parts, who+"在群里发了消息")
 	}
 	if newCount > 1 {
 		// 同时说清这批里还有谁，否则模型会把别人的话也当成对它的提问
 		parts = append(parts, fmt.Sprintf("这批一共 %d 条新消息，可能不止一个人在说话，注意分清每句是谁说的", newCount))
+	}
+	// 明确的事实：这批里有人在 @ 别人，@ 的对象不是机器人。
+	//
+	// 2026-10-01 实况：有人 @ 了另一位群友，机器人没被 @ 却抢了一句。
+	// 当时靠扣 0.50 冲动值压制——那治的是症状，模型全程并不知道发生了什么。
+	// 现在把事实告诉它，它自己判断该不该插话，比扣分有效得多。
+	//
+	// 注意措辞里**不能写「那段对话不是跟你说的」**：那是对意图的判断。
+	// 事实是「他 @ 的是 XXX」，至于是不是在叫机器人、是不是在借你说话，
+	// 模型比我们清楚（它看得到全文，我们只看到 mentions 数组）。
+	if atOthers && !atMe && !nameCalled {
+		parts = append(parts, "这批里有人 @ 了群友，不是 @ 你")
 	}
 	// @全体成员 如实说明，但必须点破「他喊的是所有人」——
 	// 不点破的话，模型会以为这条是在跟它说话，然后用「你自己@all不就完了」

@@ -155,3 +155,45 @@ func TestUpdateFailedValidateDoesNotLeak(t *testing.T) {
 		t.Fatal("Validate 失败后共享切片修改不应泄漏进 Store")
 	}
 }
+
+// okCfg 造一个能过 Validate 的配置。
+// Validate 会要求 qq.app_id 与 app_secret 非空，Default() 里是空的——
+// 不补就会看到「qq.app_id 不能为空」，那是环境问题不是被测行为。
+func okCfg() *Config {
+	c := Default()
+	c.QQ.AppID = "1905690675"
+	c.QQ.AppSecret = "test-secret"
+	return c
+}
+
+// TestMaxFactsConfigable brain.max_facts 能配，且不配时有安全默认。
+func TestMaxFactsConfigable(t *testing.T) {
+	// 不配 → Validate 回填 24（与 memory.MaxFacts 初值一致）
+	c := okCfg()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Brain.MaxFacts != 24 {
+		t.Errorf("未配置时 MaxFacts 应为 24，实际 %d", c.Brain.MaxFacts)
+	}
+	// 配了就是配的值
+	c2 := okCfg()
+	c2.Brain.MaxFacts = 40
+	if err := c2.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c2.Brain.MaxFacts != 40 {
+		t.Errorf("MaxFacts 应为 40，实际 %d", c2.Brain.MaxFacts)
+	}
+	// 0 与负数都回落到默认（避免「配 0 变成不记事」）
+	for _, bad := range []int{0, -5} {
+		c3 := okCfg()
+		c3.Brain.MaxFacts = bad
+		if err := c3.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		if c3.Brain.MaxFacts != 24 {
+			t.Errorf("MaxFacts=%d 应回落到 24，实际 %d", bad, c3.Brain.MaxFacts)
+		}
+	}
+}
