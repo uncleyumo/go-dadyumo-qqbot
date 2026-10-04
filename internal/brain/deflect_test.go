@@ -24,7 +24,7 @@ func TestDeflectOnlySendsConfiguredFallback(t *testing.T) {
 	// 多跑几轮覆盖随机抽取（deliver 每条有一次拟真的发送延迟，
 	// 所以这里只跑到「三条都出现过」为止，不铺满 30 次）
 	for i := 0; i < 12; i++ {
-		e.deflect(cfg, e.mem.Group("g1", "群A"))
+		e.deflect(cfg, e.mem.Group("g1", "群A"), false)
 	}
 
 	sender.mu.Lock()
@@ -58,7 +58,7 @@ func TestDeflectSilentWhenNoFallbackConfigured(t *testing.T) {
 	sender := &recordingSender{}
 	e := newTestEngine(t, sender, nil, false)
 
-	e.deflect(config.Config{}, e.mem.Group("g1", "群A"))
+	e.deflect(config.Config{}, e.mem.Group("g1", "群A"), false)
 
 	if n, _ := sender.count(); n != 0 {
 		t.Errorf("没配兜底话术时不应发任何消息，实际发了 %d 条", n)
@@ -73,7 +73,7 @@ func TestDeflectSkipsBlankLines(t *testing.T) {
 	cfg := config.Config{}
 	cfg.Persona.FallbackLines = []string{"   ", "", "\n"}
 	for i := 0; i < 6; i++ {
-		e.deflect(cfg, e.mem.Group("g1", "群A"))
+		e.deflect(cfg, e.mem.Group("g1", "群A"), false)
 	}
 	if n, _ := sender.count(); n != 0 {
 		t.Errorf("全是空白的兜底池不应发出消息，实际 %d 条", n)
@@ -91,12 +91,14 @@ func TestDeflectSkipsBlankLines(t *testing.T) {
 func TestFallbackLinesNeverEnterPrompt(t *testing.T) {
 	cfg := config.Config{}
 	cfg.Persona.FallbackLines = []string{"少发这种，容易把我号封了", "牛逼"}
+	// busy_lines 同理：它只在被艾特那一轮由程序发出，模型不该看见
+	cfg.Persona.BusyLines = []string{"在忙", "等会吧，没空"}
 	cfg.Persona.Catchphrases = []string{"图哪偷的"}
 
 	e := newTestEngine(t, &recordingSender{}, nil, false)
 	sys := systemPrompt(cfg, e.mem.Group("g1", "群A"), MoodSignal{}, "", "", "老张")
 
-	for _, line := range cfg.Persona.FallbackLines {
+	for _, line := range append(append([]string{}, cfg.Persona.FallbackLines...), cfg.Persona.BusyLines...) {
 		if strings.Contains(sys, line) {
 			t.Errorf("兜底话术 %q 泄漏进了系统提示词——它不该被模型看见", line)
 		}
@@ -104,5 +106,79 @@ func TestFallbackLinesNeverEnterPrompt(t *testing.T) {
 	// 反面对照：口头禅本来就该进，否则这条断言会因「什么都没进」而空过
 	if !strings.Contains(sys, "图哪偷的") {
 		t.Error("口头禅本应进系统提示词；它没进，说明上面这条断言是假通过")
+	}
+}
+// 两个池子必须互斥，一轮只发一句。
+//
+// 混池随机抽必然错配：被点名了回「牛逼」像敷衍，
+// 没人点名却说「在忙」莫名其妙。所以这里各跑几十轮，
+// 断言艾特时**只可能**出现 busy 句、非艾特时**只可能**出现 fallback 句。
+func TestDeflectPoolsAreDisjointByAtMe(t *testing.T) {
+	busy := []string{"在忙", "等会吧，没空", "一会再说"}
+	fallback := []string{"少发这种，容易把我号封了", "牛逼"}
+
+	newCfg := func() config.Config {
+		var c config.Config
+		c.Persona.BusyLines = busy
+		c.Persona.FallbackLines = fallback
+		return c
+	}
+	in := func(pool []string, s string) bool {
+		for _, p := range pool {
+			if p == s {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 艾特：只应出现 busy 池
+	e := newTestEngine(t, &recordingSender{}, nil, false)
+	sender := e.sender.(*recordingSender)
+	cfg := newCfg()
+	for i := 0; i < 12; i++ {
+		e.deflect(cfg, e.mem.Group("g1", "群A"), true)
+	}
+	sender.mu.Lock()
+	got := append([]string(nil), sender.texts...)
+	sender.mu.Unlock()
+	if len(got) == 0 {
+		t.Fatal("艾特时应发 busy 话术")
+	}
+	for _, s := range got {
+		if !in(busy, s) {
+			t.Errorf("艾特时不该发 fallback 句 %q", s)
+		}
+	}
+
+	// 非艾特：只应出现 fallback 池
+	e2 := newTestEngine(t, &recordingSender{}, nil, false)
+	sender2 := e2.sender.(*recordingSender)
+	for i := 0; i < 12; i++ {
+		e2.deflect(cfg, e2.mem.Group("g1", "群A"), false)
+	}
+	sender2.mu.Lock()
+	got2 := append([]string(nil), sender2.texts...)
+	sender2.mu.Unlock()
+	if len(got2) == 0 {
+		t.Fatal("非艾特时应发 fallback 话术")
+	}
+	for _, s := range got2 {
+		if !in(fallback, s) {
+			t.Errorf("非艾特时不该发 busy 句 %q", s)
+		}
+	}
+}
+
+// 只配了其中一个池子时，另一个场景必须闭嘴而不是发空消息。
+func TestDeflectMissingPoolStaysSilent(t *testing.T) {
+	var c config.Config
+	c.Persona.BusyLines = []string{"在忙"} // 没配 fallback
+
+	e := newTestEngine(t, &recordingSender{}, nil, false)
+	sender := e.sender.(*recordingSender)
+	e.deflect(c, e.mem.Group("g1", "群A"), false)
+	if n, _ := sender.count(); n != 0 {
+		t.Errorf("缺对应话术池时应闭嘴，实际发了 %d 条", n)
 	}
 }

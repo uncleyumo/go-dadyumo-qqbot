@@ -120,6 +120,10 @@ func TestResponsesStreamConcatenatesDeltas(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		f, _ := w.(http.Flusher)
+		// 首个 delta 之前先睡一小会儿，否则整个响应在时钟的tick 内就写完了，
+		// TTFT 与总延迟都会量成 0，`TTFTMS > 0` 随机失败
+		// （-count=200 实测偶发 26 次，与被测逻辑无关）。
+		time.Sleep(2 * time.Millisecond)
 		for _, d := range []string{"我", "真的", "不", "知道"} {
 			_, _ = w.Write([]byte("data: " + mustJSON(map[string]any{
 				"type":  "response.output_text.delta",

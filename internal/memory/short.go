@@ -162,6 +162,103 @@ type Group struct {
 	// 平台不提供群列表查询，这是唯一能拿到的「已退群」信号。
 	left   bool
 	leftAt time.Time
+
+	// boosted 是「临时提权」：目标 key -> 还剩几轮优先尝试。
+	//
+	// 起因是 2026-10-04 那次上游内容审核事故：主力模型审核严、每轮都被拒，
+	// 下游某模型兜住了，于是每轮都白烧一次主力调用。提权让兜住过的模型
+	// 在这个群里连跑几轮，把那几次浪费消掉。
+	//
+	// **不落盘**：重启后不该记得半小时前谁救过场——那正是「记忆」该有的边界，
+	// 而这是纯运行时调度状态，落盘只会在重启后造成莫名其妙的偏袒。
+	boosted map[string]int
+}
+
+// BoostRounds 一次兜底成功后给该模型记几轮优先尝试。
+const BoostRounds = 5
+
+// Boost 记一次「这个模型在这个群里兜底成功了」。
+//
+// **成功一次就置为 BoostRounds，不累加。** 累加看着更慷慨，实际有害：
+// 同一个模型连续救场时，它的剩余轮数会一路涨到十几轮，
+// 而那段时间里上下文早就滚走了好几轮，它早已不再是最贴合的选择。
+// 置满反而让「最近救回来的那个模型」稳定占优——
+// 谁最后兜住了，谁就是当下最懂这个群的。
+func (g *Group) Boost(targetKey string) {
+	if g == nil || targetKey == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.boosted == nil {
+		g.boosted = map[string]int{}
+	}
+	g.boosted[targetKey] = BoostRounds
+}
+
+// BoostedTargets 返回本群当前所有提权中的目标，按剩余轮数从多到少。
+//
+// 排序按剩余轮数而非「谁最近提权」：两个模型都提权时，
+// 剩余多的那个显然更少被用掉、更该先试。
+//
+// nil 安全：工具轮测试里 chatWithTools 会被传 nil 的 Group，
+// 提权只是调度偏好，没有群就没有偏好。
+func (g *Group) BoostedTargets() []string {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.boosted) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(g.boosted))
+	for k, n := range g.boosted {
+		if n > 0 {
+			out = append(out, k)
+		}
+	}
+	// 选前 n 个最大的。用插入排序而不是 sort.Slice：
+	// 提权表极小（通常 1 个），引包不值得，且要避免闭包捕获 g.mu。
+	sort.Slice(out, func(i, j int) bool {
+		return g.boosted[out[i]] > g.boosted[out[j]]
+	})
+	return out
+}
+
+// TickBoost 所有提权各减一轮，减到 0 的移出。
+//
+// **所有目标同步递减，而不是「谁被选中谁才减」。**
+// 提权是「这个群接下来几轮优先问它」，而轮次是这个群共同的时间轴：
+// 如果只在被选中时递减，没被选中的那个会把额度一直攥在手里，
+// 哪怕它已经十几轮没上场——它的上下文早就走远了，
+// 继续占着优先位只是白白让真正合适的模型排不到前面。
+//
+// 每轮决策结束调一次（不是每次模型调用）：带工具的决策内部会调多次，
+// 按调用次数扣的话额度会飞快耗光，那不是「5 轮」的意思。
+func (g *Group) TickBoost() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for k, n := range g.boosted {
+		if n <= 1 {
+			delete(g.boosted, k)
+			continue
+		}
+		g.boosted[k] = n - 1
+	}
+}
+
+// ClearBoost 清空该群的提权。用于「这个群不聊了」这类显式重置。
+func (g *Group) ClearBoost() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	g.boosted = map[string]int{}
+	g.mu.Unlock()
 }
 
 // NewGroup 创建群上下文
@@ -172,6 +269,7 @@ func NewGroup(openID, name string) *Group {
 		facts:   map[string]string{},
 		factAt:  map[string]time.Time{},
 		members: map[string]*Member{},
+		boosted: map[string]int{},
 	}
 }
 

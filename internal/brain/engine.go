@@ -705,6 +705,10 @@ func (e *Engine) fire(groupID string) {
 	}
 
 	trigger := buildTrigger(atMe, nameCalled, fromMaster, question, replyToBot, faceSpam, atOthers, newCount, triggerName, atAll)
+	// 提权额度按「轮」消耗，而这个群的轮次由 fire 决定——被摇骰子筛掉的那些
+	// 根本不算一轮，不该扣额度。所以放在 fire 的末尾、decide 的入口，
+	// 而不是塞进 decide 的某个分支里（那样失败早退的路径会漏掉）。
+	defer g.TickBoost()
 	e.decide(cfg, g, trigger, triggerOpenID, triggerName, atMe, fromMaster,
 		images, imgSpamNote, imgWhoNote, quoted, quotedAuthor, videoFrames, mediaNote, eager)
 }
@@ -892,9 +896,10 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 		logx.Warn("决策调用失败", "group", groupLabel(g), "err", err.Error(),
 			"cost_ms", time.Since(start).Milliseconds(), "轮数", rounds)
 		// 所有目标都被内容审核拒绝：模型活着，是这轮内容过不去。
-		// 装死会让群里以为机器人坏了，发一句嘴臭的兜底更贴合人设。
+		// 装死会让群里以为机器人坏了，发一句兜底更贴合人设。
+		// atMe 决定用哪个池子：被点名要说「在忙」，其余说嘴臭的挡箭。
 		if errors.Is(err, llm.ErrAllRefused) {
-			e.deflect(cfg, g)
+			e.deflect(cfg, g, atMe)
 		}
 		return
 	}
@@ -902,6 +907,20 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 	e.stat.LastAt = now.Format("15:04:05")
 	e.stat.LastErr = ""
 	e.statMu.Unlock()
+
+	// 这次是靠下游兜底才答上来的（前面有目标扛不住这段内容）：
+	// 给真正答上来的模型记一次提权，接下来几轮优先问它，
+	// 省掉「主力每轮都被拒、每次都白烧一次调用」。
+	// 详见 memory.Group.Boost —— 为什么成功一次置满而不是累加。
+	if res.RefusedBefore > 0 {
+		g.Boost(res.Endpoint + "|" + res.Model)
+		// 归 CatDecision 而不是默认的 runtime：这条是「为什么这轮换模型了」
+		// 的唯一现场，管理端默认视图筛的就是 decision。
+		// 落 runtime 的话它会被藏进「未分类」，而排查「它怎么老是换模型」
+		// 时最想看到的就是它——曾经把这类日志加错分类，事故复盘时白找半天。
+		logx.InfoCat(logx.CatDecision, "模型兜底成功，已临时提权", "group", groupLabel(g),
+			"model", res.Model, "被拒目标数", res.RefusedBefore, "提权轮数", memory.BoostRounds)
+	}
 
 	dec, issue := ParseDecision(res.Content)
 
@@ -1038,11 +1057,12 @@ func (e *Engine) chatWithTools(ctx context.Context, cfg config.Config,
 	rounds := 0
 	for {
 		res, cerr := e.router.Chat(ctx, llm.Request{
-			Messages:    msgs,
-			NeedsVision: len(images) > 0,
-			Tools:       tools,
-			Temperature: cfg.Brain.Temperature,
-			MaxTokens:   cfg.Brain.MaxOutTokens,
+			Messages:      msgs,
+			NeedsVision:   len(images) > 0,
+			Tools:         tools,
+			Temperature:   cfg.Brain.Temperature,
+			MaxTokens:     cfg.Brain.MaxOutTokens,
+			PreferredKeys: g.BoostedTargets(),
 		})
 		rounds++
 		e.recordTokens(res, system, user)
@@ -1451,15 +1471,30 @@ func (e *Engine) speak(cfg config.Config, g *memory.Group, text, replyToOpenID s
 // 嘴臭的、跟内容毫无关系的话，观感上像「懒得搭理你」，
 // 而不像后台报错。
 //
+// **两个池子，一轮只发一句，互斥。** 被人点名和没人点名的观感要求不同：
+//   - 艾特 → persona.busy_lines（「在忙」「等会吧」）。被 @ 了还回「牛逼」很怪，
+//     回「在忙」才自然——而且被点名后沉默是最伤的观感，必须给个回应。
+//   - 非艾特 → persona.fallback_lines（「少发这种」「牛逼」）。
+//
+// 混池随机抽必然错配：没点名却说「在忙」莫名其妙，点名了说「牛逼」像敷衍。
+//
 // 关键约束：**绝不能把上游的拒绝说明发出去，也绝不能写进记忆**。
 // 2026-10-04 生产事故就是这么滚起来的：那句含「sensitive words」的英文
 // 被当成发言发进群，又被 recordSent 写回上下文，于是每轮都重新触发拒绝、
 // 重新写回，自我复制（详见 internal/llm/refusal.go）。
-// 所以这里只发 persona.fallback_lines 里预先写好的中文，一句都不带上游痕迹。
-func (e *Engine) deflect(cfg config.Config, g *memory.Group) {
-	pool := cfg.Persona.FallbackLines
+// 所以这里只发预先写好的中文，一句都不带上游痕迹。
+//
+// atMe 只取**真正的艾特**，不含「直接叫名字」：叫名字时它在跟人聊天，
+// 不是在要求机器人回应，回「在忙」才是错的。
+func (e *Engine) deflect(cfg config.Config, g *memory.Group, atMe bool) {
+	pool := cfg.Persona.BusyLines
+	kind := "被艾特"
+	if !atMe {
+		pool = cfg.Persona.FallbackLines
+		kind = "未艾特"
+	}
 	if len(pool) == 0 {
-		// 没人配过兜底话术就不说话——总比发一句空消息强
+		// 没配对应的话术就不说话——总比发一句空消息强
 		g.MarkAttempted()
 		return
 	}
@@ -1469,7 +1504,7 @@ func (e *Engine) deflect(cfg config.Config, g *memory.Group) {
 		return
 	}
 	logx.InfoCat(logx.CatSpeak, "内容被上游拒绝，已发兜底话术",
-		"group", groupLabel(g), "内容", truncate(line, 40))
+		"group", groupLabel(g), "场景", kind, "内容", truncate(line, 40))
 	e.speak(cfg, g, line, "")
 }
 

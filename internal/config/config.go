@@ -266,6 +266,13 @@ type PersonaConfig struct {
 	// 照抄固定串（生产实测「绷」7 天 15 次、「图」占 9%）。
 	// 兜底话术要的是「有事才说一句」，与日常口头禅是两种用途，必须分开。
 	FallbackLines []string `json:"fallback_lines"`
+
+	// BusyLines 同样是「全拒时发一句」，但只在**被指名艾特**的那一轮用。
+	//
+	// 与 FallbackLines 分开是因为语义不同，混池必然错配：
+	// 被人点名却回一句「牛逼」很怪，回「在忙」才自然；
+	// 而没人点名时说「在忙」又莫名其妙。两池互斥，一轮只发一句。
+	BusyLines []string `json:"busy_lines"`
 	// 这里曾有一个 Loyalty（对开发者的态度），2026-10-03 删掉。
 	// 它在固定段无条件注入，等于开了一个绕过特权的泄漏口：即使把
 	// dev_enabled 关掉，模型仍能从「那是把你做出来的人，给他点面子」里
@@ -774,6 +781,9 @@ func (c *Config) Clone() Config {
 	}
 	if c.Persona.FallbackLines != nil {
 		out.Persona.FallbackLines = append([]string(nil), c.Persona.FallbackLines...)
+	}
+	if c.Persona.BusyLines != nil {
+		out.Persona.BusyLines = append([]string(nil), c.Persona.BusyLines...)
 	}
 	if c.Persona.SilenceRules != nil {
 		out.Persona.SilenceRules = append([]string(nil), c.Persona.SilenceRules...)

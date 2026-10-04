@@ -247,3 +247,124 @@ func TestRouterRefusedFailsOverToNextTarget(t *testing.T) {
 		t.Error("应先尝试严格目标，再因被拒换到宽松目标")
 	}
 }
+
+// 提权的核心价值：兜底成功的模型下一轮被优先尝试，
+// **省掉「主力每轮都被拒」那次白烧的调用**。
+// 这是 2026-10-04 事故留下的实际浪费：每轮 A 拒 → C 过，恒定多烧一次。
+func TestPreferredKeySkipsTheRefusingTarget(t *testing.T) {
+	m := newMock()
+	m.on("strict", func(w http.ResponseWriter, model string, stream bool) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{"role": "assistant", "content": prodRefusal},
+			}},
+		})
+	})
+	m.on("lax", func(w http.ResponseWriter, model string, stream bool) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{"role": "assistant", "content": "说人话"},
+			}},
+		})
+	})
+	srv := httptest.NewServer(m)
+	defer srv.Close()
+
+	st := testStore(t, `"endpoints":[{"id":"A","name":"A","base_url":"`+srv.URL+`","api_key":"k","enabled":true,"timeout_ms":5000,"models":[`+
+		`{"id":"strict","enabled":true,"max_ctx":8000,"max_out":512,"priority":10},`+
+		`{"id":"lax","enabled":true,"max_ctx":8000,"max_out":512,"priority":1}]}]`)
+	r := NewRouter(st)
+
+	// 第一轮：没有提权，strict priority 更高 → 被拒 → 换 lax
+	if _, err := r.Chat(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "在吗"}},
+	}); err != nil {
+		t.Fatalf("第一轮应兜底成功: %v", err)
+	}
+	strictFirst, laxFirst := m.count("strict"), m.count("lax")
+	if strictFirst == 0 || laxFirst == 0 {
+		t.Fatalf("第一轮两个都该被调用，实际 strict=%d lax=%d", strictFirst, laxFirst)
+	}
+
+	// 第二轮带上提权名单（lax 的 key = 接入点|模型）
+	res, err := r.Chat(context.Background(), Request{
+		Messages:      []Message{{Role: RoleUser, Content: "在吗"}},
+		PreferredKeys: []string{"A|lax"},
+	})
+	if err != nil {
+		t.Fatalf("提权轮应直接成功: %v", err)
+	}
+	if res.Content != "说人话" {
+		t.Errorf("应拿到 lax 的回答，实际 %q", res.Content)
+	}
+	if got := m.count("strict") - strictFirst; got != 0 {
+		t.Errorf("提权生效后不该再碰 strict（省下的正是这次调用），实际多调了 %d 次", got)
+	}
+}
+
+// RefusedBefore 必须如实报数：上层靠它判断「这次是靠下游救回来的」，
+// 从而给救回来的模型记提权。报 0 就等于这个机制整个失效。
+func TestRefusedBeforeReportedOnRescue(t *testing.T) {
+	m := newMock()
+	m.on("strict", func(w http.ResponseWriter, model string, stream bool) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{"role": "assistant", "content": prodRefusal},
+			}},
+		})
+	})
+	m.on("lax", func(w http.ResponseWriter, model string, stream bool) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{"role": "assistant", "content": "说人话"},
+			}},
+		})
+	})
+	srv := httptest.NewServer(m)
+	defer srv.Close()
+
+	st := testStore(t, `"endpoints":[{"id":"A","name":"A","base_url":"`+srv.URL+`","api_key":"k","enabled":true,"timeout_ms":5000,"models":[`+
+		`{"id":"strict","enabled":true,"max_ctx":8000,"max_out":512,"priority":10},`+
+		`{"id":"lax","enabled":true,"max_ctx":8000,"max_out":512,"priority":1}]}]`)
+	r := NewRouter(st)
+
+	res, err := r.Chat(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "在吗"}},
+	})
+	if err != nil {
+		t.Fatalf("应兜底成功: %v", err)
+	}
+	if res.RefusedBefore != 1 {
+		t.Errorf("应如实报告前面有 1 个被拒，实际 %d", res.RefusedBefore)
+	}
+}
+
+// 提权是**建议不是命令**：名单里的目标这轮自己挂了，
+// 必须立刻退回正常排序，而不是把这一轮耗在死磕它上面。
+func TestPreferredKeyFallsBackWhenUnavailable(t *testing.T) {
+	m := newMock()
+	m.on("lax", func(w http.ResponseWriter, model string, stream bool) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"choices": []map[string]any{{
+				"message": map[string]any{"role": "assistant", "content": "说人话"},
+			}},
+		})
+	})
+	srv := httptest.NewServer(m)
+	defer srv.Close()
+
+	st := testStore(t, `"endpoints":[`+epJSON("A", srv.URL, "lax")+`]`)
+	r := NewRouter(st)
+
+	// 提权名单里塞一个不存在的目标：必须被跳过，而不是报错或空转
+	res, err := r.Chat(context.Background(), Request{
+		Messages:      []Message{{Role: RoleUser, Content: "在吗"}},
+		PreferredKeys: []string{"不存在的|模型", "A|也不在"},
+	})
+	if err != nil {
+		t.Fatalf("无效提权名单应被跳过并正常路由: %v", err)
+	}
+	if res.Content != "说人话" {
+		t.Errorf("应回落到正常排序拿到回答，实际 %q", res.Content)
+	}
+}

@@ -415,7 +415,10 @@ func (r *Router) Chat(ctx context.Context, req Request) (*Result, error) {
 			return nil, fmt.Errorf("预算耗尽，无法再尝试下一个目标（已尝试 %d 个）: %w", attempts, lastErr)
 		}
 
-		t := r.pick(tried, req.NeedsVision)
+		t := r.pickPreferred(req.PreferredKeys, tried, req.NeedsVision)
+		if t == nil {
+			t = r.pick(tried, req.NeedsVision)
+		}
 		if t == nil {
 			break
 		}
@@ -437,6 +440,9 @@ func (r *Router) Chat(ctx context.Context, req Request) (*Result, error) {
 				logx.Warn("调用经重试后成功", "endpoint", view.EndpointName, "model", view.Model,
 					"第几次", i+1, "耗时ms", time.Since(start).Milliseconds())
 			}
+			// 告诉上层「前面有几个是被内容审核挡掉的」：
+			// 这是它给真正答上来的模型记提权的唯一依据（见 Result.RefusedBefore）。
+			res.RefusedBefore = refused
 			return res, nil
 		}
 		elapsed := msSince(start)
@@ -650,6 +656,37 @@ func (r *Router) ordered(exclude map[string]bool, jitter, needVision bool) (snap
 }
 
 // pick 选出当前最优且未尝试过的目标。needVision 见 ordered。
+// pickPreferred 按调用方给的优先名单选目标，一个都不合适就返回 nil。
+//
+// **返回 nil 交回 pick 是设计的一部分**：提权只是建议。
+// 名单里的目标可能已经冷却、被判死、或不带图能力，
+// 任何一种情况下都该立刻退回正常排序，而不是硬着头皮再试它一次。
+func (r *Router) pickPreferred(keys []string, tried map[string]bool, needVision bool) *Target {
+	if len(keys) == 0 {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, k := range keys {
+		t := r.targets[k]
+		if t == nil || tried[k] {
+			continue
+		}
+		t.mu.Lock()
+		view, h := t.snapLocked(), *t.h
+		t.mu.Unlock()
+		if !view.Enabled || h.Dead || h.Cooling(time.Now()) {
+			continue
+		}
+		// 带图请求不能派给不吃图的目标——那会稳定 404，还白赔一次调用
+		if needVision && !view.Vision {
+			continue
+		}
+		return t
+	}
+	return nil
+}
+
 func (r *Router) pick(tried map[string]bool, needVision bool) *Target {
 	// 只有当「启用中的目标全部被判定不可用」时才放开一轮重新探测。
 	// 注意必须区别于「本次请求已把所有候选试过一遍」——后者应直接放弃，

@@ -374,6 +374,14 @@ func TestNeedsVisionExcludesTextOnlyModels(t *testing.T) {
 		t.Errorf("非 vision 目标不该被调用，实际 %d 次", m.count("textonly"))
 	}
 	// 不带图时它仍然是正常候选——这才能证明上面是被 vision 过滤掉的，不是配置问题
+	//
+	// 必须关掉探路（ε-贪心，同 priority 档内随机选）：开着的话这一轮可能
+	// 又挑中 seer，textonly 一次都不会被调用，断言随机失败。
+	// 这是个先前就存在的偶发失败（-count=200 能稳定复现），与本文件其他
+	// 断言排序的测试一样用 exploreEpsilon=0 换确定性。
+	old := exploreEpsilon
+	exploreEpsilon = 0
+	defer func() { exploreEpsilon = old }()
 	if _, err := r.Chat(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	}); err != nil {
