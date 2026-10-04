@@ -257,6 +257,15 @@ type PersonaConfig struct {
 	// 以下是「活人感」的三块关键约束，缺一个就会退化成问答机器人
 	SilenceRules []string `json:"silence_rules"` // 什么时候该闭嘴
 	RefuseRules  []string `json:"refuse_rules"`  // 什么时候该拒绝（被当工具使唤、恶意调戏）
+
+	// FallbackLines 是「所有模型都拒绝这轮内容」时随机发一句的兜底话术。
+	//
+	// **刻意不复用 Catchphrases**：那一项会被拼进系统提示词的【你的口头禅】，
+	// 拿来当兜底池等于把这些句子同时变成模型日常的口头禅——
+	// 而人设 v2（2026-10-04）费力把 catchphrases 清空过，正是为了不让模型
+	// 照抄固定串（生产实测「绷」7 天 15 次、「图」占 9%）。
+	// 兜底话术要的是「有事才说一句」，与日常口头禅是两种用途，必须分开。
+	FallbackLines []string `json:"fallback_lines"`
 	// 这里曾有一个 Loyalty（对开发者的态度），2026-10-03 删掉。
 	// 它在固定段无条件注入，等于开了一个绕过特权的泄漏口：即使把
 	// dev_enabled 关掉，模型仍能从「那是把你做出来的人，给他点面子」里
@@ -762,6 +771,9 @@ func (c *Config) Clone() Config {
 	}
 	if c.Persona.Catchphrases != nil {
 		out.Persona.Catchphrases = append([]string(nil), c.Persona.Catchphrases...)
+	}
+	if c.Persona.FallbackLines != nil {
+		out.Persona.FallbackLines = append([]string(nil), c.Persona.FallbackLines...)
 	}
 	if c.Persona.SilenceRules != nil {
 		out.Persona.SilenceRules = append([]string(nil), c.Persona.SilenceRules...)

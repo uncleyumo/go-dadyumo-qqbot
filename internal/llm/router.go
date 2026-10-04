@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -398,6 +399,7 @@ func (r *Router) Chat(ctx context.Context, req Request) (*Result, error) {
 	tried := map[string]bool{}
 	var lastErr error
 	var attempts int
+	refused := 0 // 被内容审核拒绝的目标数，用来判定「是不是内容的问题」
 
 	for i := 0; i < maxTry; i++ {
 		// 剩余预算不够再跑一次有意义的尝试时就停手。外层 ctx 是整条链的总预算，
@@ -464,6 +466,18 @@ func (r *Router) Chat(ctx context.Context, req Request) (*Result, error) {
 			return nil, fmt.Errorf("请求被上游拒绝: %w", cerr)
 		}
 
+		// 内容被上游审核拦下：要换目标（各家口径不同，换一家可能就过了），
+		// 但**绝不能冷却或降权**——目标本身好得很，是这次的内容踩了它的线。
+		// 走 recordFailure 会把主力推进指数退避，只因为有人在群里说了句敏感词，
+		// 代价与故障完全不成比例（2026-10-04 生产实测形态，见 refusal.go）。
+		if cerr.Kind == ErrKindRefused {
+			lastErr = cerr
+			refused++
+			logx.Warn("内容被上游拒绝，换下一个目标（不冷却本目标）",
+				"endpoint", view.EndpointName, "model", view.Model, "err", cerr.Error())
+			continue
+		}
+
 		backoff := t.recordFailure(cerr)
 		lastErr = cerr
 		logx.Warn("调用失败，切换到下一个目标", "endpoint", view.EndpointName, "model", view.Model,
@@ -486,8 +500,20 @@ func (r *Router) Chat(ctx context.Context, req Request) (*Result, error) {
 		return nil, fmt.Errorf("没有可用的接入点与模型")
 	}
 	r.noteFail(fmt.Sprintf("已尝试 %d 个目标仍失败", attempts))
+	// 每个目标都试过了、每一个都是被内容审核拦下——这是「内容问题」，不是「服务挂了」。
+	// 上层要靠这个区分来决定是发一句嘴臭的兜底还是安静闭嘴，两者对用户的观感完全不同。
+	if refused == attempts {
+		return nil, fmt.Errorf("%w（已尝试 %d 个目标，全部被内容审核拒绝）", ErrAllRefused, attempts)
+	}
 	return nil, fmt.Errorf("所有接入点的所有模型均不可用（已尝试 %d 个）: %w", attempts, lastErr)
 }
+
+// ErrAllRefused 所有目标都以「内容被审核拒绝」告终。
+//
+// 单独一个哨兵错误，因为上层对它的处置和对「服务不可用」完全不同：
+// 前者说明模型都活着、只是这轮内容过不去，发一句嘴臭的兜底比装死自然；
+// 后者是真故障，闭嘴才是对的。用 errors.Is 判定，不要匹配错误文本。
+var ErrAllRefused = errors.New("所有目标均拒绝该内容")
 
 // noteFail 记一次整体失败。取消/预算耗尽/请求不合法都走这里，
 // 保证 total_req 与 fail_req 的口径一致（早先取消分支只加 fail 不加 total，面板会少算）。

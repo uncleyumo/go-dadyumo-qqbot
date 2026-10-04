@@ -26,6 +26,7 @@ package brain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -890,6 +891,11 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 		e.statMu.Unlock()
 		logx.Warn("决策调用失败", "group", groupLabel(g), "err", err.Error(),
 			"cost_ms", time.Since(start).Milliseconds(), "轮数", rounds)
+		// 所有目标都被内容审核拒绝：模型活着，是这轮内容过不去。
+		// 装死会让群里以为机器人坏了，发一句嘴臭的兜底更贴合人设。
+		if errors.Is(err, llm.ErrAllRefused) {
+			e.deflect(cfg, g)
+		}
 		return
 	}
 	e.stat.LastModel = res.Model
@@ -1436,6 +1442,35 @@ const passiveMaxSends = 5
 // eager 传 true：它只被测试当「立刻回一句」用，传 true 语义更贴。
 func (e *Engine) speak(cfg config.Config, g *memory.Group, text, replyToOpenID string) int {
 	return e.deliver(cfg, g, textOnlyBlocks(text), replyToOpenID, true)
+}
+
+// deflect 在「所有目标都拒绝这轮内容」时发一句兜底。
+//
+// 为什么不装死：这机器人的人设是大多数时候不说话，但「有话接话却被上游毙掉」
+// 和「懒得理」在群里看起来完全一样——都是没反应。发一句短的、
+// 嘴臭的、跟内容毫无关系的话，观感上像「懒得搭理你」，
+// 而不像后台报错。
+//
+// 关键约束：**绝不能把上游的拒绝说明发出去，也绝不能写进记忆**。
+// 2026-10-04 生产事故就是这么滚起来的：那句含「sensitive words」的英文
+// 被当成发言发进群，又被 recordSent 写回上下文，于是每轮都重新触发拒绝、
+// 重新写回，自我复制（详见 internal/llm/refusal.go）。
+// 所以这里只发 persona.fallback_lines 里预先写好的中文，一句都不带上游痕迹。
+func (e *Engine) deflect(cfg config.Config, g *memory.Group) {
+	pool := cfg.Persona.FallbackLines
+	if len(pool) == 0 {
+		// 没人配过兜底话术就不说话——总比发一句空消息强
+		g.MarkAttempted()
+		return
+	}
+	line := pool[rand.Intn(len(pool))]
+	if strings.TrimSpace(line) == "" {
+		g.MarkAttempted()
+		return
+	}
+	logx.InfoCat(logx.CatSpeak, "内容被上游拒绝，已发兜底话术",
+		"group", groupLabel(g), "内容", truncate(line, 40))
+	e.speak(cfg, g, line, "")
 }
 
 // groupLabel 日志里显示的群名。

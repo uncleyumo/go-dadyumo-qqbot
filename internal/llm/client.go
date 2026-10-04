@@ -217,6 +217,13 @@ const (
 	ErrKindBadRequest
 	// ErrKindBudget 剩余预算不足以再跑一次有意义的尝试。
 	ErrKindBudget
+	// ErrKindRefused 上游以 HTTP 200 的形式拒绝了这次请求——
+	// 正文不是模型的回答，而是一句「你的提示词含敏感词」之类的说明。
+	//
+	// 单独一类，因为它既不是目标坏了，也不是请求本身不合法：
+	//   - 不冷却、不降权：目标健康得很，是这次的内容踩了它的审核线
+	//   - 但要换目标：不同厂商的审核口径不同，换一个可能就过了
+	ErrKindRefused
 )
 
 func (k ErrorKind) String() string {
@@ -239,6 +246,8 @@ func (k ErrorKind) String() string {
 		return "请求不合法"
 	case ErrKindBudget:
 		return "预算耗尽"
+	case ErrKindRefused:
+		return "内容被上游拒绝"
 	}
 	return "未知"
 }
@@ -831,6 +840,12 @@ func readFull(ctxErr ctxErrFn, r io.Reader, start time.Time, view TargetView) (*
 		pt, ot := parsed.tokens()
 		return nil, emptyContentErr(form, view, pt, ot, short)
 	}
+	// 正文非空但其实是上游的拒绝说明：必须判在「成功」之前。
+	// 顺序很重要——放这里而不是最前面，是为了先让工具轮和空内容走各自的分支。
+	if looksLikeRefusal(content) {
+		pt, ot := parsed.tokens()
+		return nil, refusalErr(content, view, pt, ot)
+	}
 	return res, nil
 }
 
@@ -943,6 +958,10 @@ func readFullResponses(ctxErr ctxErrFn, r io.Reader, start time.Time, view Targe
 	if strings.TrimSpace(content) == "" {
 		form, short := responsesEmptyForm(&parsed)
 		return nil, emptyContentErr(form, view, pt, ot, short)
+	}
+	// 同 readFull：正文非空不等于拿到回答，上游会用 200 递一句拒绝说明。
+	if looksLikeRefusal(content) {
+		return nil, refusalErr(content, view, pt, ot)
 	}
 	return res, nil
 }
