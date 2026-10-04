@@ -177,7 +177,9 @@ func (a *Agent) OnGroupMessage(ev *webhook.GroupMessage, atMe bool) {
 
 	// 只有真人的消息才能作为被动回复的锚点。
 	// 必须带上发送者：回复挂到谁的消息下，决定了群里看起来是在跟谁说话。
-	a.qq.Anchors().Add(groupID, ev.ID, openID, name)
+	// refIdx 是这条消息的引用 id（平台的 REFIDX_xxx==），有了它回复才能
+	// 发成真正的引用气泡而不只是被动挂靠。拿不到时留空即可。
+	a.qq.Anchors().Add(groupID, ev.ID, openID, name, refIdxOf(ev.MessageScene))
 
 	// 被 @ 之外，直接叫名字也算在跟它说话
 	if !atMe {
@@ -621,6 +623,30 @@ func appendPart(sb *strings.Builder, s string) {
 }
 
 // mentions 判断文本里是否叫了它的名字
+// refIdxOf 从事件的 message_scene.ext 里取出这条消息的引用 id。
+//
+// 官方文档说 message_reference 填的 message_id 要从 `message_scene.ext`
+// 取，格式是 `REFIDX_xxx==`；而 webhook 那边把 ext 声明成了 []string，
+// 说明它不是一个 JSON 对象而是若干个字符串，REFIDX 混在里面。
+// **具体哪一项、是不是每个消息都有，官方没写死**，所以这里只做「找出那个
+// 形如 REFIDX…== 的项」这一件事，不猜位置、不猜个数。
+//
+// 认 `==` 结尾是刻意的：光有 REFIDX 前缀而没有 base64 尾巴的项多半是别的
+// 字段（或者格式变了），拿它去填 message_reference 会被平台拒。
+// 拿不到就返回空：那只是这条回复不带引用气泡，绝不影响它发出去。
+func refIdxOf(scene *webhook.MessageScene) string {
+	if scene == nil {
+		return ""
+	}
+	for _, item := range scene.Ext {
+		s := strings.TrimSpace(item)
+		if strings.HasPrefix(s, "REFIDX") && strings.HasSuffix(s, "==") {
+			return s
+		}
+	}
+	return ""
+}
+
 func mentions(text, name string) bool {
 	name = strings.TrimSpace(name)
 	if name == "" {

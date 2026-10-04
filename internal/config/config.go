@@ -254,6 +254,18 @@ type PersonaConfig struct {
 	Catchphrases []string `json:"catchphrases"`
 	MaxChars     int      `json:"max_chars"` // 单条发言最大字数
 
+	// ReplyRules 是「怎么回话」的正向分寸。
+	//
+	// 为什么必须独立成节：它是**正向**指导（该接话时怎么接），
+	// 而 RoastRules / SilenceRules / RefuseRules / RedLines 全是**禁令**。
+	//
+	// 混在一张卡里的代价是实打实的（2026-10-05 用户反馈）：
+	// 「很多对于回复的指导找不到地方，放哪里都不合适，只得拆进行为边界中」。
+	// 根因是没有正向那一格——那些规则是按「什么时候不做什么」组织的，
+	// 于是「该说什么、怎么说」这类指导只能硬塞进去，
+	// 而模型读到一整节禁令时，会把它当成消极清单。
+	ReplyRules []string `json:"reply_rules"`
+
 	// 以下是「活人感」的三块关键约束，缺一个就会退化成问答机器人
 	SilenceRules []string `json:"silence_rules"` // 什么时候该闭嘴
 	RefuseRules  []string `json:"refuse_rules"`  // 什么时候该拒绝（被当工具使唤、恶意调戏）
@@ -343,6 +355,22 @@ type BrainConfig struct {
 	// 压到长边 1024 的 JPEG 通常只剩一两百 KB，模型照样看得清。
 	// 设为 0 表示关闭压缩（原图直传，仅用于调试）。
 	ImageMaxSide int `json:"image_max_side"`
+
+	// GIFFrames 一张动图最多按总时长均匀拆成几帧送给模型看。
+	//
+	// 为什么需要：GIF 在 imgproc 里被显式豁免压缩（原样透传，见那里的理由），
+	// 发出去的是完整的多帧字节，而**上游 vision 模型只看得到首帧**——
+	// 群里大量表情包是动图，模型只能看到开场。视频早就抽帧了
+	// （brain/video.go 的 extractFrames），GIF 一直没有对应实现。
+	//
+	// **这个额度独立于 MaxImagesPerCall**，不占普通图片的名额：
+	// 一张动图不该把同批次里其它静图全挤掉（用户 2026-10-05 定的）。
+	// 代价是最坏一轮 MaxImagesPerCall + GIFFrames 张图，token 约为原来的 2.7 倍。
+	//
+	// 设为 0 表示不拆帧，原样透传（与本改动之前的行为一致）。
+	// 表情包池的入池路径**不受影响**：它拿的始终是原始 GIF，
+	// 拆帧只作用于「给模型看」这一侧。
+	GIFFrames int `json:"gif_frames"`
 
 	// 视频理解：≤ VideoMaxSec 的视频抽 VideoFrames 帧进上下文（复用图片管道），
 	// 音轨交给 ASR 转文字；超过 VideoMaxSec 的直接不处理——超长视频的转写
@@ -613,6 +641,17 @@ func (c *Config) Validate() error {
 	if c.Brain.ImageMaxSide <= 0 {
 		c.Brain.ImageMaxSide = 1024
 	}
+	// GIFFrames 刻意**不兜底**。其余字段都是「<=0 就给默认值」，
+	// 这里不能照做：0 在这一项上是「不拆帧」的明确语义，
+	// 而 Go 分不出「配置里没写这个键」与「写了 0」。
+	// 若按惯例兜底成 5，想关掉拆帧的人就永远关不掉；
+	// 若兜底成 0，老配置升级上来会静默保持旧行为、看着像改动没生效。
+	// 所以约定：默认值写在 config.json.example 里（当前 5），
+	// 缺这一键的老配置一律视为 0（不拆），改行为要在配置里显式加。
+	//
+	// 它**不进管理控制台**：与 max_images_per_call 不同，这一项基本不用调，
+	// 而控制台每个表单项都要在 index.html 的三处接上（框/读回/存回）并配套
+	// wiring 测试。为一个几乎不改的值付这个维护成本不划算。
 	if c.Brain.VideoMaxSec <= 0 {
 		c.Brain.VideoMaxSec = 120
 	}
@@ -790,6 +829,9 @@ func (c *Config) Clone() Config {
 	}
 	if c.Persona.RefuseRules != nil {
 		out.Persona.RefuseRules = append([]string(nil), c.Persona.RefuseRules...)
+	}
+	if c.Persona.ReplyRules != nil {
+		out.Persona.ReplyRules = append([]string(nil), c.Persona.ReplyRules...)
 	}
 	if c.Master.OpenIDs != nil {
 		out.Master.OpenIDs = append([]string(nil), c.Master.OpenIDs...)

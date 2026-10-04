@@ -75,10 +75,10 @@ type Event struct {
 	OpenID    string
 	Name      string
 	Content   string
-	Images []string   // 这条消息**自己**带的图片 URL（表情包/截图都算），可为空
-	Videos []MediaRef // 消息里带的视频附件（不含引用里的），可为空
-	Voices []VoiceRef // 平台没给转写文本、留了音频地址的语音（兜底转写用），可为空
-	Quoted string     // 被引用的消息文本（有人引用着说话时才有），可为空
+	Images    []string   // 这条消息**自己**带的图片 URL（表情包/截图都算），可为空
+	Videos    []MediaRef // 消息里带的视频附件（不含引用里的），可为空
+	Voices    []VoiceRef // 平台没给转写文本、留了音频地址的语音（兜底转写用），可为空
+	Quoted    string     // 被引用的消息文本（有人引用着说话时才有），可为空
 
 	// QuotedPics 是**被引用的那条消息里**的图片，带原作者。
 	//
@@ -846,10 +846,24 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 		notes = append(notes, n)
 	}
 	var dataURLs []string
+	// poolSrcs 与 dataURLs **逐下标对应**，但内容不同：
+	// dataURLs 是给模型看的（GIF 会拆成若干张静态帧），
+	// poolSrcs 是给表情包池用的（始终是原始那一张，会动的）。
+	//
+	// 分开是因为这两件事的诉求相反：模型需要看到动图的过程，
+	// 而池子要收的是能再发出去的动图本身。共用一份的话，
+	// 模型报「第 3 张有梗」时池子里会存进一张 JPEG 静帧——
+	// 2026-10-01 那次 GIF 被压成静图的事故换个入口重演一遍。
+	var poolSrcs []string
 	// 视频帧排最前面：发视频的人，视频就是话题本体，
 	// 宁可挤掉普通图片的名额也要保住它。
 	if len(videoFrames) > 0 {
 		dataURLs = append(dataURLs, videoFrames...)
+		// 视频帧没有「原始版 vs 拆帧版」之分，两边塞同一串，
+		// 行为与引入 poolSrcs 之前逐字一致。
+		for _, f := range videoFrames {
+			poolSrcs = append(poolSrcs, f)
+		}
 	}
 	if len(images) > 0 {
 		// 这三条都只是「这轮没图」，措辞必须和 quoteNote 同一原则：
@@ -863,8 +877,10 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 				"%s发了 %d 张图片/表情包，你这轮先顾视频。",
 				orDefault(triggerName, "有人"), len(images)))
 		} else {
-			imgGot := e.fetchImages(images, imgBudget, cfg.Brain.ImageMaxSide)
+			imgGot, srcs := e.fetchImages(images, imgBudget,
+				cfg.Brain.ImageMaxSide, cfg.Brain.GIFFrames)
 			dataURLs = append(dataURLs, imgGot...)
+			poolSrcs = append(poolSrcs, srcs...)
 			if len(imgGot) == 0 {
 				notes = append(notes, "有人发了图片/表情包。")
 			} else if len(imgGot) < len(images) {
@@ -956,15 +972,40 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 	}
 
 	// 记住它想记住的东西
+	//
+	// 这一段原来是裸循环，一行日志都没有，于是「模型到底主动记过什么」
+	// 在生产上完全不可观测：控制台里那几条长期要点，看不出是模型写的
+	// 还是管理端手工加的（2026-10-05 排查时只能靠时间戳与 fact/set
+	// 请求逐秒比对才分辨出来）。写不写完全看模型心情，落一条日志才能
+	// 知道它到底多久主动记一次。
+	//
+	// 归 CatDecision 而不是默认的 runtime：这是「上下文里为什么多了这条」
+	// 的现场，与上面那条提权日志同理——管理端默认视图筛的就是 decision，
+	// 且它是唯一被强制持久化进统计库的分类，放对地方重启后也查得到。
 	for _, m := range dec.Memo {
-		g.SetFact(m.K, m.V)
+		if evicted := g.SetFact(m.K, m.V); evicted != "" {
+			logx.InfoCat(logx.CatDecision, "写入长期记忆，挤掉了最旧一条",
+				"group", groupLabel(g), "key", truncate(m.K, 30), "淘汰", truncate(evicted, 30))
+			continue
+		}
+		logx.InfoCat(logx.CatDecision, "写入长期记忆",
+			"group", groupLabel(g), "key", truncate(m.K, 30))
 	}
 
 	// 交付内容：blocks 优先，没有就回落 text。
 	// 归一化在 allowBlocks 里做——空块、非法类型、超预算全在那里拦。
 	//
+	// at 块在这里就地解析成 openid：用 resolveReplyTarget 同一套映射
+	// （它最终落到 lookupMemberOpenID），与 to 字段的反查表是同一份——
+	// 模型照抄的名字在那边能对上，这边就一定能对上，反之亦然。
+	// 对不上的 at 块在 allowBlocks 里直接丢，不猜。
+	//
 	// 必须在日志之前算：这一轮到底发没发出去，取决于它，判据就是这里。
-	blocks, hasContent := allowBlocks(dec.Blocks, dec.Text, cfg.Speak.MaxSegments)
+	blocks, hasContent := allowBlocks(dec.Blocks, dec.Text, cfg.Speak.MaxSegments,
+		func(name string) string {
+			oid, _ := lookupMemberOpenID(g, name)
+			return oid
+		})
 
 	// **一次模型调用只落一条决策日志。**
 	//
@@ -1004,7 +1045,7 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 
 	if dec.Act != "say" || !hasContent {
 		// 收图与发不发言无关：闭嘴那轮照样可能看见一张值得留的梗图。
-		e.collectMemes(cfg, dec.Collect, dataURLs)
+		e.collectMemes(cfg, dec.Collect, dataURLs, poolSrcs)
 		e.statMu.Lock()
 		e.stat.Quiet++
 		e.statMu.Unlock()
@@ -1018,7 +1059,7 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 	sent := e.deliver(cfg, g, blocks, replyToOpenID, eager)
 
 	// 放在发完之后：收图要走一次 MinIO 上传，挂在发消息前面只会让群里多等。
-	e.collectMemes(cfg, dec.Collect, dataURLs)
+	e.collectMemes(cfg, dec.Collect, dataURLs, poolSrcs)
 
 	// 统计只认真正送达的条数：Said 原来在发送之前自增，
 	// 一条都没发出去的轮次照样计数，管理端展示的那个数字是虚高的。
@@ -1204,27 +1245,61 @@ func hasVisionModel(cfg config.Config) bool {
 	return false
 }
 
-// fetchImages 把图片 URL 抓成 data URI（顺带压缩），最多取 limit 张。
+// fetchImages 把图片 URL 抓成 data URI（顺带压缩），最多给模型 limit 张。
 // 单张失败跳过：群里的图经常是过期链接或超大截图。
+//
+// 返回**两个一一对应但内容不同**的切片：
+//   - views：给模型看的。GIF 会按总时长均匀拆成最多 gifFrames 张静态帧。
+//   - srcs：同一位置的**原始那一张**，给表情包池用。
+//
+// 为什么要两份：模型需要看到动图的过程（上游 vision 只认首帧），
+// 而池子要收的是能再发出去的动图本身。共用 dataURLs 的话，
+// 模型报「第 3 张有梗」时池子里会存进一张 JPEG 静帧。
+//
+// gifFrames 是**独立额度**，不占 limit：limit 是 max_images_per_call，
+// 卡的是普通图片的份数；一张动图拆出来的 5 帧不该把旁边的静图全挤掉
+// （用户 2026-10-05 明确选了「GIF 帧走单独额度」）。代价是最坏一轮
+// limit + gifFrames 张图，token 是原来的约 2.7 倍。
 //
 // 失败记 **Warn 而不是 Debug**：生产环境跑的是 Info 级别（没设 QQPAL_LOG_LEVEL），
 // Debug 在那里等于不存在。2026-10-02 那次「机器人说看不见图」就是这么查不下去的——
 // 日志里干干净净，什么都看不出来，只能靠猜。抓图失败是**用户可见的功能缺陷**
 // （模型确实少看了东西），必须留下痕迹。
-func (e *Engine) fetchImages(urls []string, limit, maxSide int) []string {
+func (e *Engine) fetchImages(urls []string, limit, maxSide, gifFrames int) ([]string, []string) {
 	out := make([]string, 0, limit)
+	srcs := make([]string, 0, limit)
 	for _, u := range urls {
 		if len(out) >= limit {
 			break
 		}
-		d, err := imgproc.FetchAsDataURL(u, maxSide)
+		// gifFrames<=0 是「不拆帧」的明确语义（见 config.BrainConfig.GIFFrames
+		// 的注释：老配置缺这一键时就是 0，行为与本改动之前完全一致）。
+		// 这一条必须原样传给 FetchViews —— 它内部把 <=0 当作「原样透传」，
+		// 这里若自作主张改成 limit，就等于把「关掉」悄悄变成了「按 limit 拆」，
+		// 用户写 0 之后看到动图还是被拆了，而配置里明明白白是 0。
+		n := 0
+		if gifFrames > 0 {
+			// 每张图各自取名额：静态图占 1，动图按实际拆出的帧数占。
+			// 动图的帧数不受 limit 约束（那是独立额度），
+			// 也不该无限——刷屏时一次来十张动图就是 50 帧，比不拆还贵。
+			n = limit - len(out)
+			if n < gifFrames {
+				n = gifFrames
+			}
+		}
+		views, src, err := imgproc.FetchViews(u, maxSide, n)
 		if err != nil {
 			logx.Warn("图片抓取失败，跳过", "url", truncate(u, 60), "err", err.Error())
 			continue
 		}
-		out = append(out, d)
+		out = append(out, views...)
+		// 每个 view 都记同一个 src：模型的「第 k 张」对应的是同一张原图，
+		// 无论它被拆成了几帧。这么记调用方按下标取时不可能错位。
+		for range views {
+			srcs = append(srcs, src)
+		}
 	}
-	return out
+	return out, srcs
 }
 
 // maybeSummarize 把「更早之前的聊天」压成一段提要，替换掉会越喂越长的原始历史。

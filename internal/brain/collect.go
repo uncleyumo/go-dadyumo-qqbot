@@ -26,10 +26,14 @@ const maxCollectPerRound = 3
 // （decide 里抓成 dataURL 喂进去了），让模型顺手报一句「第几张、是什么」
 // 就是零额外成本。再单独调一次模型看同一张图，纯属重复付费。
 //
-// dataURLs 的下标就是模型看到的图片序号（视频抽帧排在前面），
-// 所以这里必须原样用同一份切片，中途任何重排都会让序号对不上。
-func (e *Engine) collectMemes(cfg config.Config, items []Collect, dataURLs []string) {
-	if len(items) == 0 || len(dataURLs) == 0 {
+// 取图用 poolSrcs 而不是 dataURLs，两者**下标一一对应但内容不同**：
+// dataURLs 是模型看到的东西（动图会拆成若干张静态帧），
+// poolSrcs 是同一位置的原始那一张（会动）。
+// 用 dataURLs 取图的话，池子里会多一张不会动的表情包——
+// 2026-10-01 那次 GIF 被压成静图的事故换个入口重演一遍，
+// 而 memepool 自己的测试抓不到（它直接调 Add，不经过这里）。
+func (e *Engine) collectMemes(cfg config.Config, items []Collect, dataURLs, poolSrcs []string) {
+	if len(items) == 0 || len(poolSrcs) == 0 {
 		return
 	}
 	pool := e.poolOf(cfg)
@@ -45,11 +49,12 @@ func (e *Engine) collectMemes(cfg config.Config, items []Collect, dataURLs []str
 			break
 		}
 		// 序号越界说明模型在编。宁可少收，也不能拿一个不存在的下标去取图。
+		// 拿 dataURLs 的长度做界：它是模型看到的序号空间。
 		if it.I < 1 || int(it.I) > len(dataURLs) {
 			logx.Warn("模型给的图片序号越界，已忽略", "序号", it.I, "本轮图片数", len(dataURLs))
 			continue
 		}
-		data, mime, err := decodeDataURL(dataURLs[it.I-1])
+		data, mime, err := decodeDataURL(poolSrcs[it.I-1])
 		if err != nil {
 			logx.Warn("图片解不开，收编跳过", "序号", it.I, "err", err.Error())
 			continue

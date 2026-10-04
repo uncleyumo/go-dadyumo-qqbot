@@ -209,7 +209,12 @@ func TestScheduleDecideReportsAllFields(t *testing.T) {
 
 // TestScheduleAllowWrapsDecide 老接口行为不变。
 func TestScheduleAllowWrapsDecide(t *testing.T) {
-	s := config.ScheduleConfig{Enabled: true, Mode: "always", BaseRate: 1.0}
+	// 用 always_strict（真的 1.0），不是 always。
+	// 2026-10-03 拆档后 always 是 0.90，而这条测试一直写着 "always"
+	// 却断言「在线率 1.0 时必须放行」——它其实是在赌那 10%。
+	// 单跑必过（运气好），-count=20 稳定失败 2 次左右：
+	// 于是在 -shuffle=on 的全量里随机炸，炸时看起来像是本轮改动碰坏了它。
+	s := config.ScheduleConfig{Enabled: true, Mode: "always_strict", BaseRate: 1.0}
 	if !ScheduleAllow(s, time.Now(), false, false, time.Hour) {
 		t.Error("在线率 1.0 时必须放行")
 	}

@@ -45,7 +45,7 @@ func TestParseDecisionImageOnly(t *testing.T) {
 	if len(d.Blocks) != 1 || d.Blocks[0].T != BlockTypeImg {
 		t.Fatalf("应有一个图片块，got %+v", d.Blocks)
 	}
-	blocks, ok := allowBlocks(d.Blocks, d.Text, 5)
+	blocks, ok := allowBlocks(d.Blocks, d.Text, 5, nil)
 	if !ok || len(blocks) != 1 || blocks[0].ID != 7 {
 		t.Errorf("只发图应算有内容，got %#v ok=%v", blocks, ok)
 	}
@@ -61,7 +61,7 @@ func TestParseDecisionTextFallback(t *testing.T) {
 	if d.Text == "" {
 		t.Error("text 应被解析出来")
 	}
-	blocks, ok := allowBlocks(d.Blocks, d.Text, 5)
+	blocks, ok := allowBlocks(d.Blocks, d.Text, 5, nil)
 	if !ok || len(blocks) != 2 {
 		t.Fatalf("应回落成两个 text 块，got %#v", blocks)
 	}
@@ -77,7 +77,7 @@ func TestParseDecisionQuietClearsBlocks(t *testing.T) {
 	if len(d.Blocks) != 0 {
 		t.Errorf("quiet 时 blocks 应被清空，got %+v", d.Blocks)
 	}
-	if _, ok := allowBlocks(d.Blocks, d.Text, 5); ok {
+	if _, ok := allowBlocks(d.Blocks, d.Text, 5, nil); ok {
 		t.Error("quiet 时不该认为有内容可发")
 	}
 }

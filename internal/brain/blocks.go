@@ -13,17 +13,25 @@ import (
 // **顺序在这里定死**：文字和表情包的先后由 blocks 的排列决定，
 // 不由工具调用轮决定——工具轮只负责取上下文，绝不发送。
 
-// BlockTypeText / BlockTypeImg 是 blocks 里合法的类型
+// BlockTypeText / BlockTypeImg / BlockTypeAt 是 blocks 里合法的类型
 const (
 	BlockTypeText = "text"
 	BlockTypeImg  = "img"
+	// BlockTypeAt 是「把这个人真艾特出来」。程序侧渲染成平台的
+	// <qqbot-at-user id="member_openid" /> 内嵌标签，可与文字混排。
+	//
+	// 注意**不是** msg_type=5：那是 botgo 里频道（Channel）时代的遗留常量，
+	// QQ 群/单聊的开放接口枚举里根本没有这个类型。
+	BlockTypeAt = "at"
 )
 
 // allowBlocks 归一化 blocks：去空、去非法类型、按预算截断。
 //
-// 返回值第二个是 true 表示「确实要发点东西」——全空时不该发言，
-// 否则会在群里留下一条空白消息。
-func allowBlocks(blocks []Block, text string, max int) ([]Block, bool) {
+// atName 可为 nil：单元测试与部分调用路径不接群成员表。
+// 非 nil 时，at 块的名字会在这里就解析成 openid（resolveAt 可为 nil 则只清洗不解析），
+// 对不上就丢掉这个块——猜错 @ 人比不 @ 糟得多，
+// 而模型填错名字是常事（它照抄的是渲染后的称呼，可能带群名片或重名后缀）。
+func allowBlocks(blocks []Block, text string, max int, atName func(string) string) ([]Block, bool) {
 	out := make([]Block, 0, len(blocks)+1)
 
 	// blocks 为空是正常情况（模型用了旧格式），回落到 text
@@ -45,6 +53,27 @@ func allowBlocks(blocks []Block, text string, max int) ([]Block, bool) {
 					continue // 没有合法 ID 的图片块没法解析
 				}
 				out = append(out, Block{T: BlockTypeImg, ID: b.ID})
+			case BlockTypeAt:
+				name := strings.TrimSpace(b.Name)
+				if name == "" {
+					continue
+				}
+				// @全体成员 这一类直接扔：平台不支持（官方标注
+				// 「仅在文字子频道可用」，群聊等于不支持），
+				// 而模型学聊天记录里的字样发出来只会露馅（2026-10-01 事故）。
+				if stripAtAll(name) == "" {
+					continue
+				}
+				openID := ""
+				if atName != nil {
+					openID = atName(name)
+				}
+				if openID == "" {
+					// 对不上群成员表：宁可这个人不 @。
+					// 挂错人比不挂糟得多——那等于当着全群艾特了一个不相干的人。
+					continue
+				}
+				out = append(out, Block{T: BlockTypeAt, Name: name, C: openID})
 			default:
 				// 未知类型直接丢。宁可少发也不要让未知结构漏到发送层
 			}
@@ -81,6 +110,10 @@ func textOnlyBlocks(text string) []Block {
 // planDelivery 把 blocks 展开成最终的「按顺序、逐条可发」清单。
 //
 // maxSent 是硬上限（QQ 允许的被动回复次数）。
+//
+// at 块**不单独占一条**，而是渲染成下一条 text 的前缀——
+// 真人不会单发一条只有 @ 的消息，「@张三 就这吧」是一句话。
+// 于是这一层的条数预算与引入 at 之前完全一致。
 func planDelivery(blocks []Block, maxSegChars, maxSent int) []Block {
 	if maxSegChars <= 0 {
 		maxSegChars = 40
@@ -89,27 +122,57 @@ func planDelivery(blocks []Block, maxSegChars, maxSent int) []Block {
 		maxSent = 5
 	}
 	var out []Block
+	// pendingAt 是还没挂到任何文字上的 @ 前缀。
+	pendingAt := ""
 	for _, b := range blocks {
-		if b.T == BlockTypeImg {
+		switch b.T {
+		case BlockTypeImg:
 			if len(out) >= maxSent {
-				break
+				return out
 			}
+			// @ 后面紧跟一张图：这个 @ 没有可修饰的对象，
+			// 丢掉它（而不是把标签孤零零塞在图前面——那在 QQ 上不成立）。
+			pendingAt = ""
 			out = append(out, b)
+			continue
+		case BlockTypeAt:
+			if len(out) >= maxSent {
+				return out
+			}
+			// 一个 text 块里只留第一个 @：第二条再 @ 就是「@甲 @乙 说句话」，
+			// 群里看着像在挨个点名刷存在感。
+			if pendingAt == "" {
+				pendingAt = atTag(b.C)
+			}
 			continue
 		}
 		segs := SplitSegments(b.C, maxSegChars, maxSent)
 		segs = dropEmpty(DedupeMentions(segs))
 		for _, s := range segs {
 			if len(out) >= maxSent {
-				break
+				return out
+			}
+			if pendingAt != "" {
+				s = pendingAt + " " + s
+				pendingAt = ""
 			}
 			out = append(out, Block{T: BlockTypeText, C: s})
 		}
 		if len(out) >= maxSent {
-			break
+			return out
 		}
 	}
 	return out
+}
+
+// atTag 渲染平台的 @ 内嵌标签。
+//
+// QQ 的 @ 不是独立消息类型（msg_type=5 是 botgo 频道时代的遗留常量），
+// 而是文本里的一个标签：<qqbot-at-user id="member_openid" />。
+// 旧格式 <@userid> 官方标注「即将弃用」，且社区实测客户端已不再解析它
+// （会原样显示成字面量），所以不能用。
+func atTag(openID string) string {
+	return `<qqbot-at-user id="` + openID + `" />`
 }
 
 // textOf 提取全部文字块拼起来的文本，用来写进记忆与统计。

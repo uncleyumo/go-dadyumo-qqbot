@@ -142,8 +142,12 @@ func (c *Client) SendImage(ctx context.Context, groupOpenID string, data []byte,
 
 	// 与 SendGroupTo 同序：锚点必须早于任何可能失败的动作取，
 	// 否则并发下会拿到同一个 seq，平台按 (msg_id, msg_seq) 判重会拒掉。
+	//
+	// refIdx 丢弃不用：这条是手搓报文（见 postRichMedia 的注释，botgo 的
+	// RichMediaMessage 不带 MsgID，挂不上被动回复），而表情包 @ 人没有意义，
+	// 不值得为它再往这份手写 JSON 里加一个字段。
 	if cfg.QQ.PreferPassive {
-		msgID, seq, ok := c.anchors.PickAndReserve(groupOpenID, replyToOpenID)
+		msgID, _, seq, ok := c.anchors.PickAndReserve(groupOpenID, replyToOpenID)
 		if ok {
 			if !c.limiter.allow() {
 				c.anchors.Release(groupOpenID, msgID)

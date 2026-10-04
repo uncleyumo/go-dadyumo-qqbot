@@ -278,7 +278,7 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
   <!-- ============ 人设与策略 ============ -->
   <section id="p-persona" class="hide">
     <div class="panel">
-      <h2>人设本体 <span class="hint">它是谁。这部分会逐字进 system prompt，写多少烧多少 token</span></h2>
+      <h2>它是谁 <span class="hint">这部分的每一行都会逐字进 system prompt，写多少烧多少 token</span></h2>
       <div class="row"><label>名字</label><div class="fld"><input id="pf-name">
         <small class="hint">它在群里的名字，也是群友 @ 它、叫它时触发回应的关键词。</small></div></div>
       <div class="row"><label>背景</label><div class="fld"><textarea id="pf-bg" class="ta-lg"></textarea>
@@ -287,26 +287,38 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
         <small class="hint">口气什么样。举例比形容词管用：「爱用短句，偶尔阴阳怪气，从不写小作文」。</small></div></div>
       <div class="row"><label>口头禅</label><div class="fld"><textarea id="pf-catch" class="ta-list"></textarea>
         <small class="hint"><span class="hint-tag">每行一条</span>建议 ≤5 条。太多了句句都像背台词，反而假。</small></div></div>
-      <div class="row"><label>嘴臭边界</label><div class="fld"><textarea id="pf-roast" class="ta-list"></textarea>
-        <small class="hint"><span class="hint-tag">每行一条</span>损人允许损到什么程度：可以损什么、不能碰什么，写清两件事。</small></div></div>
     </div>
 
     <div class="panel">
-      <h2>行为边界 <span class="hint">什么情况不接话、什么忙不帮、什么绝不碰</span></h2>
+      <h2>怎么回话 <span class="hint">接话时往哪儿使力。这几项是<b>正向</b>指导，与下面「不做什么」的禁令分开</span></h2>
+      <div class="row"><label>回话分寸</label><div class="fld"><textarea id="pf-reply" class="ta-list"></textarea>
+        <small class="hint"><span class="hint-tag">每行一条</span>该接话时怎么接：什么话题愿意多说两句、什么话题一笔带过、
+        被追问时第几轮该换姿态。以前这类指导没地方放，只能硬塞进「行为边界」，
+        而那里全是禁令——模型读到一整节消极清单会当成消极人设。</small></div></div>
+      <div class="row"><label>嘴臭边界</label><div class="fld"><textarea id="pf-roast" class="ta-list"></textarea>
+        <small class="hint"><span class="hint-tag">每行一条</span>损人允许损到什么程度：可以损什么、不能碰什么，写清两件事。</small></div></div>
+      <div class="row"><label>单条最大字数</label><div class="fld"><input id="pf-max" type="number">
+        <small class="hint">建议 80~150。超过会显得在写小作文，不像真人说话。</small></div></div>
+    </div>
+
+    <div class="panel">
+      <h2>不做什么 <span class="hint">全是禁令：什么情况不接话、什么忙不帮、什么绝不碰</span></h2>
       <div class="row"><label>红线</label><div class="fld"><textarea id="pf-red" class="ta-list"></textarea>
         <small class="hint"><span class="hint-tag">每行一条</span>绝对不能做的事。一条总管原则优于一堆细则——规则互相打架时模型会懵，行为反而失控。</small></div></div>
       <div class="row"><label>何时闭嘴</label><div class="fld"><textarea id="pf-silence" class="ta-list"></textarea>
         <small class="hint"><span class="hint-tag">每行一条</span>什么情况不接话。「能闭嘴」是它像真人的第一条底线，建议至少保留一两条。</small></div></div>
       <div class="row"><label>何时不伺候</label><div class="fld"><textarea id="pf-refuse" class="ta-list"></textarea>
         <small class="hint warn"><span class="hint-tag">每行一条</span>⚠️ 别写一刀切拒答。「凡是求助都拒绝」会误伤真心求教的人；只写被当工具反复使唤、被恶意测试时的分寸。</small></div></div>
-      <div class="row"><label>被上游拒绝时的兜底话术</label><div class="fld"><textarea id="pf-fallback" class="ta-list"></textarea>
+    </div>
+
+    <div class="panel">
+      <h2>应急话术 <span class="hint">只在特殊场合抽一句，<b>不进 system prompt</b></span></h2>
+      <div class="row"><label>被上游拒绝时</label><div class="fld"><textarea id="pf-fallback" class="ta-list"></textarea>
         <small class="hint"><span class="hint-tag">每行一条</span>所有模型都拒绝这轮内容时，随机发一句。留空 = 那时直接闭嘴。
         刻意与「口头禅」分开：口头禅会进 system prompt 让它日常念，这儿只在模型被上游毙掉时才抽一句。</small></div></div>
       <div class="row"><label>同上·被艾特时</label><div class="fld"><textarea id="pf-busy" class="ta-list"></textarea>
         <small class="hint"><span class="hint-tag">每行一条</span>同样是全拒时发，但<b>只在被指名艾特的那一轮</b>用，与上面那个池子互斥、一轮只发一句。
         被 @ 了回「牛逼」像敷衍，回「在忙」才自然；没人点名却说「在忙」又莫名其妙，所以必须分开配。</small></div></div>
-      <div class="row"><label>单条最大字数</label><div class="fld"><input id="pf-max" type="number">
-        <small class="hint">建议 80~150。超过会显得在写小作文，不像真人说话。</small></div></div>
     </div>
 
     <div class="panel">
@@ -1245,6 +1257,7 @@ function renderPersona() {
   document.getElementById('pf-bg').value = p.background || '';
   document.getElementById('pf-style').value = p.style || '';
   document.getElementById('pf-catch').value = (p.catchphrases || []).join('\n');
+  document.getElementById('pf-reply').value = (p.reply_rules || []).join('\n');
   document.getElementById('pf-roast').value = (p.roast_rules || []).join('\n');
   document.getElementById('pf-red').value = (p.red_lines || []).join('\n');
   document.getElementById('pf-silence').value = (p.silence_rules || []).join('\n');
@@ -1288,6 +1301,7 @@ function collectPersona() {
   CFG.persona.background = document.getElementById('pf-bg').value;
   CFG.persona.style = document.getElementById('pf-style').value;
   CFG.persona.catchphrases = lines(document.getElementById('pf-catch').value);
+  CFG.persona.reply_rules = lines(document.getElementById('pf-reply').value);
   CFG.persona.roast_rules = lines(document.getElementById('pf-roast').value);
   CFG.persona.red_lines = lines(document.getElementById('pf-red').value);
   CFG.persona.silence_rules = lines(document.getElementById('pf-silence').value);

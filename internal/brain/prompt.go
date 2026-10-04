@@ -42,12 +42,19 @@ type Collect struct {
 
 // Block 是一个待发送的内容块
 type Block struct {
-	// T 是类型：text / img
+	// T 是类型：text / img / at
 	T string `json:"t"`
 	// C 是文字内容（t=text 时用）
 	C string `json:"c,omitempty"`
 	// ID 是表情包在池中的短 ID（t=img 时用）
 	ID int64 `json:"id,omitempty"`
+	// Name 是要艾特的那个人的**名字**（t=at 时用）。
+	//
+	// 存名字不存 openid：模型只认得聊天记录里的名字，
+	// 而它在上下文里看到的一律是渲染后的称呼（可能带群名片、可能有重名后缀）。
+	// 解析成人 openid 交给出口做（lookupMemberOpenID），
+	// 对不上就丢掉这个块——猜错 @ 人比不 @ 糟得多。
+	Name string `json:"name,omitempty"`
 }
 
 // Memo 一条记忆
@@ -84,6 +91,19 @@ func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHin
 	}
 	if p.Style != "" {
 		sb.WriteString("【你怎么说话】\n" + p.Style + "\n\n")
+	}
+	// 正向的回话分寸。位置紧跟【你怎么说话】：
+	// 那一节讲的是「怎么开口」，这一节讲的是「接话时往哪儿使力」，
+	// 两者连着读最顺。放在【价值观】之后不行——价值观是仲裁者，
+	// 中间隔一节具体指导会把仲裁关系冲淡。
+	//
+	// 为什么必须独立成节（不是并进「行为边界」那一堆）：
+	// RoastRules / SilenceRules / RefuseRules / RedLines 全是**禁令**，
+	// 它们组织的是「什么时候不做什么」。把「该接话时怎么接」塞进去，
+	// 模型读到的是一整节消极清单——2026-10-05 用户反馈的正是这个问题：
+	// 「很多对于回复的指导找不到地方，只得拆进行为边界中」。
+	if len(p.ReplyRules) > 0 {
+		sb.WriteString("【怎么回话】\n" + joinLines(p.ReplyRules) + "\n\n")
 	}
 	if len(p.Catchphrases) > 0 {
 		sb.WriteString("【你的口头禅】\n" + joinLines(p.Catchphrases) + "\n")
@@ -190,17 +210,25 @@ func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHin
 	sb.WriteString("别人只 @ 你没说话、或只丢了个表情包时，回「咋」「在」「嗯？」这种一两个字就够，绝对不要脑补出一大段——没话可接时，话越少越像人。\n")
 	sb.WriteString("文字和表情包加起来一共最多 5 条，发多了平台会吞掉后面的。\n\n")
 
-	// 这一节原来 11 行、1048 字节，把「不要 @xxx / 不要 @all / 不要 @全体成员」
-	// 写了好几遍。出口已经有 speak.go:atAllInOutput 兜底（发现 @全体成员
-	// 字样直接删掉），提示词不必再花 641 字节重复讲一遍——讲得越细，
-	// 这些字面串在上下文里的权重越高。
+	// 【关于 @ 别人】2026-10-05 整节重写：从「你没有这个能力」改成「你有，但少用」。
+	//
+	// 改之前是三层反向拦截（提示词否认能力、出口剥掉 @昵称、stripAtAll 删 @全体），
+	// 因为 2026-10-01 有人喊「把该打游戏的人艾特出来」，模型学了聊天记录里
+	// @全体成员 的字样，回了「你自己@all不就完了」——演一个做不到的动作。
+	// 当时的结论是「干脆不给它这个能力」，代价是模型再也不能真的艾特到人。
+	//
+	// 现在接了真 @（出口把 at 块渲染成平台的 <qqbot-at-user id=... />），
+	// 于是规则从「禁止」变成「克制」：能艾特，但要挑真正需要把人叫出来的场合。
+	// @全体成员 仍然做不到（官方标注「仅在文字子频道可用」，群聊等于不支持），
+	// 出口的 stripAtAll 也继续删——那一条没变。
 	sb.WriteString("【关于 @ 别人】\n")
-	sb.WriteString("你发出的每一条都会自动挂在 to 里那个人的消息下面，群里本来就看得出你在回谁。\n")
-	sb.WriteString("所以正文里一个 @ 都不用写——写了也只是几个字，平台上根本不会真的艾特到人，纯属演。\n")
-	// 2026-10-01 真实事故：有人说「把该打游戏的人艾特出来」，模型学了聊天记录里
-	// @全体成员 的字样，回了「你自己@all不就完了」。光说「不要用 @」不够，
-	// 得说清它压根没这个能力。
-	sb.WriteString("你压根没有 @ 任何人的能力，@全体成员 你也做不到。谁让你帮忙艾特人，就直说「我艾特不了，你自己喊」。\n\n")
+	sb.WriteString("要真的把某个人叫出来，在 blocks 里加一个 at 块：{\"t\":\"at\",\"name\":\"群名片\"}，" +
+		"name 用聊天记录里出现过的名字，一字不差地照抄。程序会把它变成真正的艾特，群里看得出。\n")
+	sb.WriteString("但大多数时候不用 at：你发出的每一条本来就会挂在 to 里那个人的消息下面，群里已经看得出你在回谁。\n")
+	sb.WriteString("只在「群里的事跟他有关、需要他知道」的时候才 at——比如你俩都对同一个东西有反应、或者他发了张图你在评价。凑热闹、刷存在感、一轮里艾特别的人都别做。\n")
+	// 这条保留原事故的教训，但立场变了：不再是「你压根做不到」，
+	// 而是「@全体成员 这个动作你做不到，别演」。
+	sb.WriteString("@全体成员 你做不到（一个都艾特不出）。谁让你帮忙艾特全员，就直说「你自己喊」，别学聊天记录里那些 @全体成员 的字样。\n\n")
 
 	// 聊天记录里的符号约定。缺了这一节模型只能猜，猜错的方向还特别糟糕：
 	// 它不知道「（流泪）」是情绪、不知道方括号是附件，就会把两者当成同一类
@@ -247,10 +275,15 @@ func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHin
 	sb.WriteString("- to：你这条是在回谁。填聊天记录里出现过的那个人的名字，只在明显在回应某人时填，否则留空。\n")
 	sb.WriteString("  你发的话会自动挂在那个人的消息下面，所以填错名字等于当着全群回错了人，比留空更糟。\n")
 	sb.WriteString("- blocks：你要发出去的内容，按顺序排。想发几条就写几个块。\n")
-	sb.WriteString("  块有两种：{\"t\":\"text\",\"c\":\"说的话\"} 和 {\"t\":\"img\",\"id\":123}（发一张表情包）。\n")
+	sb.WriteString("  块有三种：{\"t\":\"text\",\"c\":\"说的话\"}、{\"t\":\"img\",\"id\":123}（发一张表情包）、" +
+		"{\"t\":\"at\",\"name\":\"群名片\"}（把这个人真艾特出来）。\n")
 	sb.WriteString("  想发多条文字就写多个 text 块，不要在 c 里塞 \\n。\n")
 	sb.WriteString("  img 的 id 只能填你从表情包池列表里拿到的 id；没调过那个工具就别用 img。\n")
 	sb.WriteString("  只甩一张图什么都不说是允许的，那就只写一个 img 块。\n")
+	// at 块必须挨着它要修饰的那句话，否则「@张三 我觉得不是这样」
+	// 和「我 @ 张三 说不是这样」在群里是两件事。
+	sb.WriteString("  at 块放在它要接的那句 text 前面，它会变成那句的艾特前缀——别单独发一个只有 at 的块。\n")
+	sb.WriteString("  绝大多数时候不用 at（见上面【关于 @ 别人】），名字对不上就当没写，别猜。\n")
 	sb.WriteString("- tone：roast=嘴臭，warm=损完补一句实在话，empathy=认真共情\n")
 	sb.WriteString("- mem：这轮值得记住的东西，没有就给空数组\n")
 	sb.WriteString("- collect（可选）：这轮给你的图里，有值得收着以后自己发的，就写 [{\"i\":图片序号,\"d\":\"一句话描述\"}]。没有就别写这个字段。\n")

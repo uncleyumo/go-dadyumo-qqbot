@@ -24,7 +24,7 @@ func TestCollectMemesAddsToPool(t *testing.T) {
 		dataURL("image/jpeg", []byte("jpeg-frame-1")),
 		dataURL("image/jpeg", []byte("jpeg-frame-2")),
 	}
-	e.collectMemes(cfg, []Collect{{I: 2, D: "无语到翻白眼"}}, urls)
+	e.collectMemes(cfg, []Collect{{I: 2, D: "无语到翻白眼"}}, urls, urls)
 
 	if pool.Len() != 1 {
 		t.Fatalf("应收进 1 张，got %d", pool.Len())
@@ -42,7 +42,7 @@ func TestCollectRejectsOutOfRangeIndex(t *testing.T) {
 	cfg := e.store.Get()
 	urls := []string{dataURL("image/jpeg", []byte("a"))}
 
-	e.collectMemes(cfg, []Collect{{I: 0, D: "x"}, {I: 5, D: "y"}, {I: -1, D: "z"}}, urls)
+	e.collectMemes(cfg, []Collect{{I: 0, D: "x"}, {I: 5, D: "y"}, {I: -1, D: "z"}}, urls, urls)
 	if pool.Len() != 0 {
 		t.Errorf("越界序号不该收进任何东西，got %d", pool.Len())
 	}
@@ -60,7 +60,7 @@ func TestCollectRespectsPerRoundCap(t *testing.T) {
 		urls = append(urls, dataURL("image/jpeg", []byte{byte(i), 0xFF, 0xD8}))
 		items = append(items, Collect{I: int64(i + 1), D: "图"})
 	}
-	e.collectMemes(cfg, items, urls)
+	e.collectMemes(cfg, items, urls, urls)
 	if pool.Len() != maxCollectPerRound {
 		t.Errorf("单轮最多收 %d 张，got %d", maxCollectPerRound, pool.Len())
 	}
@@ -70,7 +70,7 @@ func TestCollectRespectsPerRoundCap(t *testing.T) {
 func TestCollectNoopWhenPoolDisabled(t *testing.T) {
 	e := newTestEngine(t, &recordingSender{}, nil, false)
 	cfg := e.store.Get()
-	e.collectMemes(cfg, []Collect{{I: 1, D: "x"}}, []string{dataURL("image/jpeg", []byte("a"))})
+	e.collectMemes(cfg, []Collect{{I: 1, D: "x"}}, []string{dataURL("image/jpeg", []byte("a"))}, []string{dataURL("image/jpeg", []byte("a"))})
 	// 能跑完不 panic 就够了
 }
 
@@ -84,7 +84,7 @@ func TestCollectSkipsBadDataURL(t *testing.T) {
 		"data:image/jpeg;base64,!!!不是base64!!!",
 		dataURL("image/jpeg", []byte("good")),
 	}
-	e.collectMemes(cfg, []Collect{{I: 1, D: "坏的"}, {I: 2, D: "好的"}}, urls)
+	e.collectMemes(cfg, []Collect{{I: 1, D: "坏的"}, {I: 2, D: "好的"}}, urls, urls)
 
 	if pool.Len() != 1 {
 		t.Fatalf("只该收进好的那张，got %d", pool.Len())

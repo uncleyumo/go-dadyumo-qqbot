@@ -137,15 +137,16 @@ func (c *Client) SendGroupTo(ctx context.Context, groupOpenID, content, replyToO
 	// 先看有没有锚点，再扣限流配额：发不出去的消息不该白吃一分钟的额度。
 	// PickAndReserve 同时完成了占用与取 seq，所以必须早于任何可能失败的发送动作。
 	if cfg.QQ.PreferPassive {
-		msgID, seq, ok := c.anchors.PickAndReserve(groupOpenID, replyToOpenID)
+		msgID, refIdx, seq, ok := c.anchors.PickAndReserve(groupOpenID, replyToOpenID)
 		if ok {
 			if !c.limiter.allow() {
 				c.anchors.Release(groupOpenID, msgID)
 				return errors.New("发送限流：本分钟配额已用尽")
 			}
-			err := c.post(ctx, groupOpenID, content, msgID, seq)
+			err := c.post(ctx, groupOpenID, content, msgID, refIdx, seq)
 			if err == nil {
-				logx.Debug("群消息已发送（被动）", "group", groupOpenID, "seq", seq, "挂给", replyToOpenID)
+				logx.Debug("群消息已发送（被动）", "group", groupOpenID, "seq", seq, "挂给", replyToOpenID,
+					"引用", refIdx != "")
 				return nil
 			}
 			// 只还额度，不回滚 seq——见 anchor.go 里 seq 只增不减的说明
@@ -159,15 +160,37 @@ func (c *Client) SendGroupTo(ctx context.Context, groupOpenID, content, replyToO
 	return errors.New("无可用被动锚点（主动消息已下线，无法凭空发送）")
 }
 
-func (c *Client) post(ctx context.Context, groupOpenID, content, msgID string, seq uint32) error {
+// post 发一条被动回复。
+//
+// msgID 是被动回复必需的锚点；refIdx 非空时**额外**挂一个 message_reference，
+// 让这条以真正的引用气泡展示。两者可以共存（官方请求示例就是并存的），
+// 所以加引用不必牺牲被动回复资格。
+//
+// refIdx 为空时整个 MessageReference 字段为 nil，序列化后不出现——
+// 平台不一定每条消息都给 refIdx，不该因为缺它就发不出去。
+func (c *Client) post(ctx context.Context, groupOpenID, content, msgID, refIdx string, seq uint32) error {
+	msg := buildGroupMessage(content, msgID, refIdx, seq)
+	_, err := c.api.PostGroupMessage(ctx, groupOpenID, msg)
+	return err
+}
+
+// buildGroupMessage 拼一条被动回复。
+//
+// 抽成独立函数是为了能被测试直接验序列化结果——botgo 的 apiBase 写死在
+// SDK 里，测试没法指向 httptest 服务器，而这里恰恰是最容易出错的一处：
+// MessageReference 只要给了非 nil 指针，MessageID 没有 omitempty，
+// 空 refIdx 也会被序列化成 {"message_id":""} 送出去，平台会拒。
+func buildGroupMessage(content, msgID, refIdx string, seq uint32) *dto.MessageToCreate {
 	msg := &dto.MessageToCreate{
 		Content: content,
 		MsgType: dto.TextMsg,
 		MsgID:   msgID,
 		MsgSeq:  seq,
 	}
-	_, err := c.api.PostGroupMessage(ctx, groupOpenID, msg)
-	return err
+	if refIdx != "" {
+		msg.MessageReference = &dto.MessageReference{MessageID: refIdx}
+	}
+	return msg
 }
 
 // SendC2C 向用户单聊发送文本

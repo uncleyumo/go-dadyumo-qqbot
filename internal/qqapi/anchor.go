@@ -29,6 +29,16 @@ type anchor struct {
 	// 平台会当成重复消息拒掉，表现为这个群突然彻底哑火。
 	// 早期版本在发送失败时 seq-- 就是踩了这个坑。
 	seq uint32
+	// refIdx 是这条消息的引用 id（平台给的 REFIDX_xxx==），
+	// 来自事件的 message_scene.ext。
+	//
+	// 为什么需要它：被动回复挂的 msg_id 让 QQ 客户端渲染成「@原发送者」的样式，
+	// 而真正独立的引用气泡要靠 message_reference。两者可以同时出现在一次请求里
+	// （官方示例就是 msg_id 与 message_reference 并存），所以接上引用不必牺牲被动回复。
+	//
+	// 为空是常态而不是错误：平台不一定每条消息都给 refIdx，
+	// 拿不到时整个 message_reference 字段省略，退化成改动前的行为。
+	refIdx string
 }
 
 // AnchorPool 维护每个群最近的用户消息，作为被动回复的挂载点。
@@ -50,7 +60,9 @@ func NewAnchorPool(keep int) *AnchorPool {
 // Add 记录一条可用于被动回复的用户消息。
 // sender/openID 缺省为空（旧调用方），此时该锚点只能作为「回退到最新」的候选，
 // 不会被优先选中——宁可挂最新的，也别挂到一个不知道是谁的。
-func (p *AnchorPool) Add(groupOpenID, msgID, senderOpenID, senderName string) {
+//
+// refIdx 为空（平台没给）不影响任何东西，只是这条锚点发出去时不带 message_reference。
+func (p *AnchorPool) Add(groupOpenID, msgID, senderOpenID, senderName, refIdx string) {
 	if groupOpenID == "" || msgID == "" {
 		return
 	}
@@ -64,10 +76,15 @@ func (p *AnchorPool) Add(groupOpenID, msgID, senderOpenID, senderName string) {
 				a.sender = senderOpenID
 				a.name = senderName
 			}
+			// refIdx 同理：平台可能第一条事件里还没有 message_scene
+			if a.refIdx == "" && refIdx != "" {
+				a.refIdx = refIdx
+			}
 			return
 		}
 	}
-	list = append(list, &anchor{msgID: msgID, sender: senderOpenID, name: senderName, ts: time.Now()})
+	list = append(list, &anchor{msgID: msgID, sender: senderOpenID, name: senderName,
+		refIdx: refIdx, ts: time.Now()})
 	if len(list) > p.keep {
 		list = list[len(list)-p.keep:]
 	}
@@ -82,7 +99,11 @@ func (p *AnchorPool) Add(groupOpenID, msgID, senderOpenID, senderName string) {
 //
 // preferSender 非空时优先挂到这个人最近的一条消息下——这是「回对谁」的关键。
 // 找不到（他太久没说话 / 锚点已满）就退回群里最新的一条。
-func (p *AnchorPool) PickAndReserve(groupOpenID, preferSender string) (msgID string, seq uint32, ok bool) {
+//
+// 多返回一个 refIdx（那条消息的引用 id，可能为空）：
+// 调用方拿它填 message_reference，就能发出真正的引用气泡而不只是被动挂靠。
+// 为空时整个字段省略——平台不给 refIdx 是常态，不该因此发不出去。
+func (p *AnchorPool) PickAndReserve(groupOpenID, preferSender string) (msgID, refIdx string, seq uint32, ok bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -95,7 +116,7 @@ func (p *AnchorPool) PickAndReserve(groupOpenID, preferSender string) (msgID str
 	}
 	p.m[groupOpenID] = alive
 	if len(alive) == 0 {
-		return "", 0, false
+		return "", "", 0, false
 	}
 
 	var target *anchor
@@ -114,7 +135,7 @@ func (p *AnchorPool) PickAndReserve(groupOpenID, preferSender string) (msgID str
 
 	target.used++
 	target.seq++
-	return target.msgID, target.seq, true
+	return target.msgID, target.refIdx, target.seq, true
 }
 
 // Release 发送失败：把这次占用的回复额度还回去。
