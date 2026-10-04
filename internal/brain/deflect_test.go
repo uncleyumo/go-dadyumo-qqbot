@@ -79,3 +79,30 @@ func TestDeflectSkipsBlankLines(t *testing.T) {
 		t.Errorf("全是空白的兜底池不应发出消息，实际 %d 条", n)
 	}
 }
+
+// 兜底话术**绝不能**进系统提示词。
+//
+// 它和 persona.catchphrases 长得像（都是一句中文短句），但用途相反：
+// 口头禅是给模型日常用的，进固定段正是它的用法；兜底话术是上游拒答时
+// 由程序抽一句发出去，模型自己永远不该「想起」它。
+// 混进去的后果很具体：模型学会主动说这些句子，于是每次上游拒绝时
+// 可能连兜底都不用等——群里开始无缘无故蹦出「牛逼」「你赢了」。
+// 人设 v2（2026-10-04）费力清空 catchphrases 就是为了压住这个倾向。
+func TestFallbackLinesNeverEnterPrompt(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Persona.FallbackLines = []string{"少发这种，容易把我号封了", "牛逼"}
+	cfg.Persona.Catchphrases = []string{"图哪偷的"}
+
+	e := newTestEngine(t, &recordingSender{}, nil, false)
+	sys := systemPrompt(cfg, e.mem.Group("g1", "群A"), MoodSignal{}, "", "", "老张")
+
+	for _, line := range cfg.Persona.FallbackLines {
+		if strings.Contains(sys, line) {
+			t.Errorf("兜底话术 %q 泄漏进了系统提示词——它不该被模型看见", line)
+		}
+	}
+	// 反面对照：口头禅本来就该进，否则这条断言会因「什么都没进」而空过
+	if !strings.Contains(sys, "图哪偷的") {
+		t.Error("口头禅本应进系统提示词；它没进，说明上面这条断言是假通过")
+	}
+}

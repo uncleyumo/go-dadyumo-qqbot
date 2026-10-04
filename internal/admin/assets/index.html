@@ -299,6 +299,9 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
         <small class="hint"><span class="hint-tag">每行一条</span>什么情况不接话。「能闭嘴」是它像真人的第一条底线，建议至少保留一两条。</small></div></div>
       <div class="row"><label>何时不伺候</label><div class="fld"><textarea id="pf-refuse" class="ta-list"></textarea>
         <small class="hint warn"><span class="hint-tag">每行一条</span>⚠️ 别写一刀切拒答。「凡是求助都拒绝」会误伤真心求教的人；只写被当工具反复使唤、被恶意测试时的分寸。</small></div></div>
+      <div class="row"><label>被上游拒绝时的兜底话术</label><div class="fld"><textarea id="pf-fallback" class="ta-list"></textarea>
+        <small class="hint"><span class="hint-tag">每行一条</span>所有模型都拒绝这轮内容时，随机发一句。留空 = 那时直接闭嘴。
+        刻意与「口头禅」分开：口头禅会进 system prompt 让它日常念，这儿只在模型被上游毙掉时才抽一句。</small></div></div>
       <div class="row"><label>单条最大字数</label><div class="fld"><input id="pf-max" type="number">
         <small class="hint">建议 80~150。超过会显得在写小作文，不像真人说话。</small></div></div>
     </div>
@@ -1243,6 +1246,7 @@ function renderPersona() {
   document.getElementById('pf-red').value = (p.red_lines || []).join('\n');
   document.getElementById('pf-silence').value = (p.silence_rules || []).join('\n');
   document.getElementById('pf-refuse').value = (p.refuse_rules || []).join('\n');
+  document.getElementById('pf-fallback').value = (p.fallback_lines || []).join('\n');
   document.getElementById('pf-max').value = p.max_chars || 0;
   document.getElementById('bf-budget').value = b.daily_budget || 0;
   document.getElementById('bf-hist').value = b.max_history || 0;
@@ -1284,6 +1288,7 @@ function collectPersona() {
   CFG.persona.red_lines = lines(document.getElementById('pf-red').value);
   CFG.persona.silence_rules = lines(document.getElementById('pf-silence').value);
   CFG.persona.refuse_rules = lines(document.getElementById('pf-refuse').value);
+  CFG.persona.fallback_lines = lines(document.getElementById('pf-fallback').value);
   CFG.persona.max_chars = +document.getElementById('pf-max').value || 0;
   CFG.brain.daily_budget = +document.getElementById('bf-budget').value || 0;
   CFG.brain.max_history = +document.getElementById('bf-hist').value || 0;
