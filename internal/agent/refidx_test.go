@@ -8,10 +8,20 @@ import (
 
 // 从 message_scene.ext 里挑出 REFIDX 那一项。
 //
-// 官方文档说 message_reference 的 message_id 取自 message_scene.ext，
-// 格式 `REFIDX_xxx==`；webhook 那边把 ext 声明成 []string，
-// 说明它不是 JSON 对象而是若干个串。具体哪一项官方没写死，
-// 所以这里只认「以 REFIDX 开头」这一条规则。
+// 官方文档说 message_reference 的 message_id 取自 message_scene.ext；
+// webhook 那边把 ext 声明成 []string，说明它不是 JSON 对象而是若干个串。
+// 具体哪一项官方没写死，所以只认「以 REFIDX 开头」这一条规则。
+//
+// **不看结尾的等号**：原先要求 `HasSuffix(s, "==")`，理由是「光有前缀没有
+// base64 尾巴的多半是别的字段」。2026-10-05 生产实测把这个理由证伪了——
+// 平台自己在发送响应里回的 ref_idx 长这样，一个等号都没有：
+//
+//	REFIDX_Qei0iMbCOW3ppae9xcVSc0rm9yqc4qnAcCg4vzTeynTp9SdlGHyVAg008Hbl9
+//	Jy+yA+LCZQ1Ain0c4/6ZvJqkgN1hB5UrAUCtlype9vWVI1rJuREWnOzxs0uipjLv5P2
+//
+// base64 补位有 `==` / `=` / 无 三种，按 `==` 收口等于把大部分 REFIDX
+// 判成「不是引用 id」，于是 message_reference 一次都没填出去过。
+// 前缀已经足够特异，改成只认前缀 + 不许含空白。
 func TestRefIdxOfPicksTheREFIDXEntry(t *testing.T) {
 	cases := []struct {
 		name string
@@ -23,10 +33,16 @@ func TestRefIdxOfPicksTheREFIDXEntry(t *testing.T) {
 		{"带空格", []string{"  REFIDX_ghi==  "}, "REFIDX_ghi=="},
 		{"没有", []string{"aaa", "bbb"}, ""},
 		{"空", nil, ""},
-		// 光有前缀没有 base64 尾巴多半是别的字段，认它等于往
-		// message_reference 里塞垃圾串，平台会拒。
-		{"前缀有但缺 == 尾巴", []string{"REFIDX"}, ""},
-		{"前缀有但尾巴不全", []string{"REFIDX_abc"}, ""},
+		// 生产实测的形态：ext 是 key=value 的列表，引用 id 挂在 msg_idx= 下面，
+		// 而且没有 base64 补位。
+		{"实测形态 msg_idx=", []string{
+			"auth_token=X-qanh",
+			"msg_idx=REFIDX_up/YiEUb8GdEXXvI6brWRvTBuCHlaxd5HElEqR5jze2wkEJVddGFxZiQzibnAXSCQB/CHEwNaKZiLI6LuedCqUBrSVSaLO0Oq3bS8uDYbglrrnPeQkuSGokwo51hdSHY",
+		}, "REFIDX_up/YiEUb8GdEXXvI6brWRvTBuCHlaxd5HElEqR5jze2wkEJVddGFxZiQzibnAXSCQB/CHEwNaKZiLI6LuedCqUBrSVSaLO0Oq3bS8uDYbglrrnPeQkuSGokwo51hdSHY"},
+		{"msg_idx 后面不是 REFIDX", []string{"msg_idx=whatever"}, ""},
+		{"别的键不认", []string{"auth_token=REFIDX_abc"}, ""},
+		{"值里带空格的不认", []string{"msg_idx=REFIDX abc"}, ""},
+		{"光秃秃的前缀不认", []string{"msg_idx=REFIDX"}, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

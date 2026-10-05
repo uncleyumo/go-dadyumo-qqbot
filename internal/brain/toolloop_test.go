@@ -20,9 +20,10 @@ import (
 // 「内容对但发了两次」在群里比「这次没说话」糟得多。
 
 type recordingSender struct {
-	mu    sync.Mutex
-	texts []string
-	imgs  []int64
+	mu     sync.Mutex
+	texts  []string
+	quoted []string
+	imgs   []int64
 }
 
 // SendGroup 满足 brain.Sender（3 参数，无挂载人）
@@ -37,6 +38,16 @@ func (r *recordingSender) SendGroup(ctx context.Context, groupID, content string
 func (r *recordingSender) SendGroupTo(ctx context.Context, groupID, content, replyTo string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.texts = append(r.texts, content)
+	return nil
+}
+
+// SendGroupQuote 记进 quoted：引用与普通发送在测试里必须分得开，
+// 否则「模型开口要了引用」和「程序擅自加的引用」测不出区别。
+func (r *recordingSender) SendGroupQuote(ctx context.Context, groupID, content, replyTo string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.quoted = append(r.quoted, content)
 	r.texts = append(r.texts, content)
 	return nil
 }

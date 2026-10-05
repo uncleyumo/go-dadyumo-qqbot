@@ -13,7 +13,7 @@ func ib(id int64) Block  { return Block{T: BlockTypeImg, ID: id} }
 
 // 只有文字时，blocks 为空要回落到 text 字段（兼容旧格式）
 func TestAllowBlocksFallsBackToText(t *testing.T) {
-	got, ok := allowBlocks(nil, "第一句\n第二句", 5, nil)
+	got, ok := allowBlocks(nil, "第一句\n第二句", 5, nil, nil)
 	if !ok {
 		t.Fatal("应有内容可发")
 	}
@@ -36,7 +36,7 @@ func TestAllowBlocksAllEmptyNoSpeak(t *testing.T) {
 		{"未知类型", []Block{{T: "video", C: "x"}}, ""},
 	}
 	for _, c := range cases {
-		if _, ok := allowBlocks(c.blocks, c.text, 5, nil); ok {
+		if _, ok := allowBlocks(c.blocks, c.text, 5, nil, nil); ok {
 			t.Errorf("%s: 不该认为有内容可发", c.name)
 		}
 	}
@@ -44,7 +44,7 @@ func TestAllowBlocksAllEmptyNoSpeak(t *testing.T) {
 
 // 「只甩一张图什么都不说」是群里最常见的表情包用法，必须能表达
 func TestAllowBlocksImageOnly(t *testing.T) {
-	got, ok := allowBlocks([]Block{ib(42)}, "", 5, nil)
+	got, ok := allowBlocks([]Block{ib(42)}, "", 5, nil, nil)
 	if !ok {
 		t.Fatal("只有图片也算有内容")
 	}
@@ -56,7 +56,7 @@ func TestAllowBlocksImageOnly(t *testing.T) {
 // 顺序必须原样保留——「先说后甩」和「先甩后说」在群里是两回事
 func TestAllowBlocksPreservesOrder(t *testing.T) {
 	in := []Block{tb("看这个"), ib(7), tb("补一句")}
-	got, ok := allowBlocks(in, "", 5, nil)
+	got, ok := allowBlocks(in, "", 5, nil, nil)
 	if !ok || len(got) != 3 {
 		t.Fatalf("应原样保留 3 块，got %#v", got)
 	}
@@ -68,7 +68,7 @@ func TestAllowBlocksPreservesOrder(t *testing.T) {
 // 超预算要截断，且优先保前面的（后面的内容在群里已经过期了）
 func TestAllowBlocksTruncates(t *testing.T) {
 	in := []Block{tb("1"), tb("2"), tb("3"), tb("4"), tb("5"), ib(9)}
-	got, ok := allowBlocks(in, "", 3, nil)
+	got, ok := allowBlocks(in, "", 3, nil, nil)
 	if !ok || len(got) != 3 {
 		t.Fatalf("应截断到 3 块，got %d", len(got))
 	}

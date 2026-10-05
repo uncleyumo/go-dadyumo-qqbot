@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -129,6 +130,20 @@ func (c *Client) SendGroup(ctx context.Context, groupOpenID, content string) err
 //
 // replyToOpenID 为空时退化成旧行为：挂到群里最新那条消息下。
 func (c *Client) SendGroupTo(ctx context.Context, groupOpenID, content, replyToOpenID string) error {
+	return c.sendGroup(ctx, groupOpenID, content, replyToOpenID, false)
+}
+
+// SendGroupQuote 与 SendGroupTo 相同，但这条挂一个真正的引用气泡
+// （message_reference）——引用的是 replyToOpenID 那条的锚点。
+//
+// 什么时候该引用由 brain 那边的模型逐块决定（Block.Q），不由这一层决定：
+// 2026-10-05 之前是「平台给了 refIdx 就用」，而平台每条消息都给，
+// 结果每条回复都套着引用卡片——真人聊天里没有这种机器人。
+func (c *Client) SendGroupQuote(ctx context.Context, groupOpenID, content, replyToOpenID string) error {
+	return c.sendGroup(ctx, groupOpenID, content, replyToOpenID, true)
+}
+
+func (c *Client) sendGroup(ctx context.Context, groupOpenID, content, replyToOpenID string, quote bool) error {
 	if strings.TrimSpace(content) == "" || groupOpenID == "" {
 		return errors.New("空的发送目标或内容")
 	}
@@ -138,6 +153,10 @@ func (c *Client) SendGroupTo(ctx context.Context, groupOpenID, content, replyToO
 	// PickAndReserve 同时完成了占用与取 seq，所以必须早于任何可能失败的发送动作。
 	if cfg.QQ.PreferPassive {
 		msgID, refIdx, seq, ok := c.anchors.PickAndReserve(groupOpenID, replyToOpenID)
+		// 模型没开口要引用就把 refIdx 丢掉：它不填进请求，消息照发，只是不带气泡。
+		if !quote {
+			refIdx = ""
+		}
 		if ok {
 			if !c.limiter.allow() {
 				c.anchors.Release(groupOpenID, msgID)
@@ -161,6 +180,25 @@ func (c *Client) SendGroupTo(ctx context.Context, groupOpenID, content, replyToO
 }
 
 // post 发一条被动回复。
+//
+// **带 @ 的那条走 markdown 通道（msg_type=2），不带 @ 的走纯文本（msg_type=0）。**
+//
+// 2026-10-05 生产实测：同一个 `<qqbot-at-user id="…" />` 标签，
+// 放纯文本 content 里 HTTP 200 OK，但客户端**原样打印成字面量**
+// （那串 hex 还被自动识别成链接），完全不渲染成 @；
+// 放 markdown.content 里才真的艾特到人（社区 ala-mobile-tool 五轮实测矩阵同结论，
+// 同症状同标签，唯一差别就是 msg_type）。
+// 官方文档写着 msg_type=0 也支持——这句与实现对不上，别再照它写。
+//
+// 官方明确「传了 markdown 后 content 字段必须为空」，两者互斥，
+// 所以 buildGroupMessage 里把 content 清空。Content 有 omitempty，不会残留。
+//
+// 只给带 @ 的消息换通道：markdown 消息在群里渲染成卡片样式，
+// 让机器人所有发言都变成卡片是很大的观感变更，而绝大多数消息根本不 @ 人。
+//
+// markdown 通道无需申请（官方：群聊场景自定义 Markdown 已对所有机器人开放），
+// 但富媒体/模板权限那套报错是存在的，真发不出去时日志里会看到
+// 「被动消息发送失败」，不会静默丢消息。
 //
 // msgID 是被动回复必需的锚点；refIdx 非空时**额外**挂一个 message_reference，
 // 让这条以真正的引用气泡展示。两者可以共存（官方请求示例就是并存的），
@@ -190,7 +228,27 @@ func buildGroupMessage(content, msgID, refIdx string, seq uint32) *dto.MessageTo
 	if refIdx != "" {
 		msg.MessageReference = &dto.MessageReference{MessageID: refIdx}
 	}
+	if atTagInText.MatchString(content) {
+		msg.Content = ""
+		msg.MsgType = dto.MarkdownMsg
+		msg.Markdown = &dto.Markdown{Content: flattenNewlines(content)}
+	}
 	return msg
+}
+
+// atTagInText 匹配出口渲染出来的 @ 内嵌标签。
+//
+// brain 包渲染它、qqapi 包只是在这里认出「这条要不要换通道」，
+// 所以这里匹配的是字面量而不是去 import brain——两个包互不依赖。
+var atTagInText = regexp.MustCompile(`<qqbot-at-user\s+id="[^"]*"\s*/?>`)
+
+// flattenNewlines 把换行换成空格。
+//
+// markdown 通道的内容里有换行会被平台拒（40034009 markdown参数有换行符），
+// 而正常路径上本来就没有换行（brain 那边按句子切开了），所以这只是兜底：
+// 真出现换行时宁可压成一行，也不至于让整条消息发不出去。
+func flattenNewlines(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", " "), "\n", " ")
 }
 
 // SendC2C 向用户单聊发送文本

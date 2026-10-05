@@ -175,6 +175,14 @@ func (a *Agent) OnGroupMessage(ev *webhook.GroupMessage, atMe bool) {
 	// 必须分开写：见 Member.Card 的说明。
 	a.mem.Group(groupID, groupName).TouchMember(openID, name)
 
+	// 身份也是平台给的：author.member_role（member/admin/owner）。
+	// 以前一路丢在 webhook 结构体里没人读，于是成员表里没有任何身份信息，
+	// 「艾特一下群主」对模型就成了无解的题（2026-10-05 生产实况：
+	// 模型答「不知道谁是群主」，还因为 JSON 残缺整条被按闭嘴处理）。
+	if ev.Author.MemberRole != "" {
+		a.mem.Group(groupID, groupName).TouchMemberRole(openID, ev.Author.MemberRole)
+	}
+
 	// 只有真人的消息才能作为被动回复的锚点。
 	// 必须带上发送者：回复挂到谁的消息下，决定了群里看起来是在跟谁说话。
 	// refIdx 是这条消息的引用 id（平台的 REFIDX_xxx==），有了它回复才能
@@ -551,6 +559,17 @@ func (a *Agent) SendGroup(ctx context.Context, sessionID, content string) error 
 // 这是「群里看起来在跟谁说话」的唯一决定点。replyToOpenID 为空时退化成
 // 「挂到群里最新那条」，那在多人同时说话时必然有一部分挂错人。
 func (a *Agent) SendGroupTo(ctx context.Context, sessionID, content, replyToOpenID string) error {
+	return a.sendGroup(ctx, sessionID, content, replyToOpenID, false)
+}
+
+// SendGroupQuote 实现 brain.Sender：这条以真正的引用气泡发出去。
+//
+// 单聊没有引用气泡可言，直接按普通发送处理。
+func (a *Agent) SendGroupQuote(ctx context.Context, sessionID, content, replyToOpenID string) error {
+	return a.sendGroup(ctx, sessionID, content, replyToOpenID, true)
+}
+
+func (a *Agent) sendGroup(ctx context.Context, sessionID, content, replyToOpenID string, quote bool) error {
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return nil
@@ -558,6 +577,8 @@ func (a *Agent) SendGroupTo(ctx context.Context, sessionID, content, replyToOpen
 	var err error
 	if strings.HasPrefix(sessionID, c2cPrefix) {
 		err = a.qq.SendC2C(ctx, strings.TrimPrefix(sessionID, c2cPrefix), content)
+	} else if quote {
+		err = a.qq.SendGroupQuote(ctx, sessionID, content, replyToOpenID)
 	} else {
 		err = a.qq.SendGroupTo(ctx, sessionID, content, replyToOpenID)
 	}
@@ -625,22 +646,40 @@ func appendPart(sb *strings.Builder, s string) {
 // mentions 判断文本里是否叫了它的名字
 // refIdxOf 从事件的 message_scene.ext 里取出这条消息的引用 id。
 //
-// 官方文档说 message_reference 填的 message_id 要从 `message_scene.ext`
-// 取，格式是 `REFIDX_xxx==`；而 webhook 那边把 ext 声明成了 []string，
-// 说明它不是一个 JSON 对象而是若干个字符串，REFIDX 混在里面。
-// **具体哪一项、是不是每个消息都有，官方没写死**，所以这里只做「找出那个
-// 形如 REFIDX…== 的项」这一件事，不猜位置、不猜个数。
+// 官方文档说 message_reference 填的 message_id 要从 `message_scene.ext` 取；
+// webhook 那边把 ext 声明成 []string，说明它不是一个 JSON 对象而是若干个串。
 //
-// 认 `==` 结尾是刻意的：光有 REFIDX 前缀而没有 base64 尾巴的项多半是别的
-// 字段（或者格式变了），拿它去填 message_reference 会被平台拒。
-// 拿不到就返回空：那只是这条回复不带引用气泡，绝不影响它发出去。
+// **它长什么样，2026-10-05 才在生产原文里看到过**（此前是猜的，猜错了两年）：
+//
+//	"message_scene":{"source":"default","ext":[
+//	  "msg_idx=REFIDX_up/YiEUb8…ko51hdSHY",
+//	  "auth_token=X-qanh…"]}
+//
+// ext 是若干个 key=value。我们要的是 `msg_idx=` 的**值**，也就是 `REFIDX_…`。
+//
+// 此前那两条规则（`HasPrefix(REFIDX)` 且 `HasSuffix("==")`）对着这个真实样本
+// **同时落空**：前缀撞在 `msg_idx=` 上，结尾也没有 base64 补位（base64 补位
+// 有 `==`/`=`/无 三种）。于是 message_reference 从来没被填出去过，
+// 引用气泡一次都没发出来，而日志里 `引用:false` 看着像「平台没给 id」。
+//
+// 两种形式都认：裸的 `REFIDX_…`，以及 `msg_idx=` 带前缀的（后者是实测的形态）。
+// 认不出就返回空：那只是这条回复不带引用气泡，绝不影响它发出去。
 func refIdxOf(scene *webhook.MessageScene) string {
 	if scene == nil {
 		return ""
 	}
 	for _, item := range scene.Ext {
 		s := strings.TrimSpace(item)
-		if strings.HasPrefix(s, "REFIDX") && strings.HasSuffix(s, "==") {
+		if s == "" {
+			continue
+		}
+		if val, ok := strings.CutPrefix(s, "msg_idx="); ok {
+			s = strings.TrimSpace(val)
+		} else if strings.Contains(s, "=") && !strings.HasPrefix(s, "REFIDX") {
+			continue // ext 里别的 key=value（auth_token=…），不是引用 id
+		}
+		// 含空白的是被换行/截断拆开的残片，填进 message_reference 会被平台拒
+		if strings.HasPrefix(s, "REFIDX") && s != "REFIDX" && !strings.ContainsAny(s, " \t\n") {
 			return s
 		}
 	}

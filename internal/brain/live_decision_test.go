@@ -37,6 +37,10 @@ func (s *liveSender) SendGroupTo(ctx context.Context, groupID, content, replyToO
 	return nil
 }
 
+func (s *liveSender) SendGroupQuote(ctx context.Context, groupID, content, replyToOpenID string) error {
+	return s.SendGroupTo(ctx, groupID, content, replyToOpenID)
+}
+
 // TestLiveDecisionAgainstRealModel 拿真实配置打真实模型，验证整条决策链路。
 //
 // 需要环境变量 QQBOT_LIVE_CONFIG 指向一份真实 config.json；没设置就跳过。

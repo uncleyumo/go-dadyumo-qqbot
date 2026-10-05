@@ -1,6 +1,7 @@
 package brain
 
 import (
+	"regexp"
 	"strings"
 )
 
@@ -31,7 +32,12 @@ const (
 // 非 nil 时，at 块的名字会在这里就解析成 openid（resolveAt 可为 nil 则只清洗不解析），
 // 对不上就丢掉这个块——猜错 @ 人比不 @ 糟得多，
 // 而模型填错名字是常事（它照抄的是渲染后的称呼，可能带群名片或重名后缀）。
-func allowBlocks(blocks []Block, text string, max int, atName func(string) string) ([]Block, bool) {
+//
+// atOpenID 是**反向**校验：判断一个已经成形的 openid 是不是本群成员，
+// 专门用来验模型照抄进来的标签（见 atTagInText 那段事故说明）。
+// 为 nil 时那些标签一律当幻觉删掉。
+func allowBlocks(blocks []Block, text string, max int,
+	atName func(string) string, atOpenID func(string) bool) ([]Block, bool) {
 	out := make([]Block, 0, len(blocks)+1)
 
 	// blocks 为空是正常情况（模型用了旧格式），回落到 text
@@ -47,7 +53,24 @@ func allowBlocks(blocks []Block, text string, max int, atName func(string) strin
 				if c == "" {
 					continue // 空文字块：发出去是空白消息，QQ 里会显示成一条空气
 				}
-				out = append(out, Block{T: BlockTypeText, C: c})
+				// 2026-10-05 生产事故：模型不按协议写 at 块，而是照抄**渲染后**的
+				// 标签——它前几轮自己发过，聊天记录里就有现成的样例。标签混在 text
+				// 块里，下面的 at 分支根本看不到，于是原样发进群，而那个 openid 是
+				// 它自己编的。这里把它收编回 at 块：在成员表里就是一次合法艾特，
+				// 不在就只删标签、把句子留下（猜错 @ 人比不 @ 糟得多）。
+				if oid, ok := leadingAtOpenID(c); ok && atOpenID != nil && atOpenID(oid) {
+					c = stripAtTags(c)
+					out = append(out, Block{T: BlockTypeAt, C: oid})
+					if c != "" {
+						out = append(out, Block{T: BlockTypeText, C: c})
+					}
+					continue
+				}
+				c = stripAtTags(c)
+				if c == "" {
+					continue
+				}
+				out = append(out, Block{T: BlockTypeText, C: c, Q: b.Q})
 			case BlockTypeImg:
 				if b.ID <= 0 {
 					continue // 没有合法 ID 的图片块没法解析
@@ -156,7 +179,7 @@ func planDelivery(blocks []Block, maxSegChars, maxSent int) []Block {
 				s = pendingAt + " " + s
 				pendingAt = ""
 			}
-			out = append(out, Block{T: BlockTypeText, C: s})
+			out = append(out, Block{T: BlockTypeText, C: s, Q: b.Q})
 		}
 		if len(out) >= maxSent {
 			return out
@@ -173,6 +196,41 @@ func planDelivery(blocks []Block, maxSegChars, maxSent int) []Block {
 // （会原样显示成字面量），所以不能用。
 func atTag(openID string) string {
 	return `<qqbot-at-user id="` + openID + `" />`
+}
+
+// atTagInText 匹配「模型正文里出现的平台 @ 标签」。
+//
+// 为什么要单独认它：出口渲染出来的就是这个样子，而渲染结果会进聊天记录、
+// 会进它自己的记忆，于是模型随时会把它当模板抄回来——它并不知道
+// 「写 {"t":"at","name":...}」才是唯一的正确姿势。
+//
+// 2026-10-05 生产实况：模型写出了 `<qqbot-at-user id="D1DBAF…"/>` 这样一个
+// 完整 openid。那串值不在任何上下文里，是它编的（碰巧对上了群成员）。
+//
+// 所以这个标签一律**不信任**：只有 allowBlocks 认得它、并拿成员表验过，
+// 才转成正规的 at 块；否则只删标签保句子。
+var atTagInText = regexp.MustCompile(`<qqbot-at-user\s+id\s*=\s*"([^"]*)"\s*/?>`)
+
+// leadingAtOpenID 判断正文是否以 @ 标签开头，是则返回那个 openid。
+//
+// **只认句首**：夹在句子中间的标签提成 at 块就没地方放它前面的字了
+// （planDelivery 只会把 @ 放句首），为了一个艾特丢掉半句话不划算，
+// 那种情况交给 stripAtTags 只删标签。
+func leadingAtOpenID(text string) (string, bool) {
+	m := atTagInText.FindStringSubmatchIndex(text)
+	if m == nil || m[0] != 0 {
+		return "", false
+	}
+	openID := text[m[2]:m[3]]
+	return openID, openID != ""
+}
+
+// stripAtTags 从正文里删掉所有 @ 标签，句子本身留下。
+func stripAtTags(text string) string {
+	if !atTagInText.MatchString(text) {
+		return text
+	}
+	return strings.TrimSpace(atTagInText.ReplaceAllString(text, " "))
 }
 
 // textOf 提取全部文字块拼起来的文本，用来写进记忆与统计。

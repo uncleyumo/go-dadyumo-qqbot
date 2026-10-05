@@ -12,6 +12,9 @@ import (
 // atNameOK 是一个「什么名字都认」的解析器，用于只测管道形状的用例。
 func atNameOK(name string) string { return "OID-" + name }
 
+// atOpenIDOK 只认 atNameOK 造出来的那些 openid，用于照抄标签的用例。
+func atOpenIDOK(openID string) bool { return strings.HasPrefix(openID, "OID-") }
+
 // at 块必须渲染成平台的 @ 内嵌标签。
 //
 // QQ 的 @ 不是 msg_type=5（那是 botgo 频道时代的遗留常量，群/单聊接口里
@@ -21,7 +24,7 @@ func TestAtBlockRendersPlatformTag(t *testing.T) {
 	got, ok := allowBlocks([]Block{
 		{T: BlockTypeAt, Name: "老张"},
 		{T: BlockTypeText, C: "这图是你吧"},
-	}, "", 5, atNameOK)
+	}, "", 5, atNameOK, atOpenIDOK)
 	if !ok || len(got) != 2 {
 		t.Fatalf("应保留 at 与 text 两个块，实际 ok=%v n=%d", ok, len(got))
 	}
@@ -47,7 +50,7 @@ func TestAtAttachesToTheFollowingText(t *testing.T) {
 		{T: BlockTypeAt, Name: "老张"},
 		{T: BlockTypeText, C: "第一条"},
 		{T: BlockTypeText, C: "第二条"},
-	}, "", 5, atNameOK)
+	}, "", 5, atNameOK, atOpenIDOK)
 
 	plan := planDelivery(blocks, 40, 5)
 	if len(plan) != 2 {
@@ -69,7 +72,7 @@ func TestAtDroppedWhenNameUnresolvable(t *testing.T) {
 	blocks, ok := allowBlocks([]Block{
 		{T: BlockTypeAt, Name: "查无此人"},
 		{T: BlockTypeText, C: "说句话"},
-	}, "", 5, func(string) string { return "" })
+	}, "", 5, func(string) string { return "" }, nil)
 
 	if !ok {
 		t.Fatal("文字还在，仍算有内容可发")
@@ -97,7 +100,7 @@ func TestAtAllStillRemovedEvenThoughAtIsAllowed(t *testing.T) {
 	blocks, ok := allowBlocks([]Block{
 		{T: BlockTypeAt, Name: "@全体成员"},
 		{T: BlockTypeText, C: "起床了"},
-	}, "", 5, atNameOK)
+	}, "", 5, atNameOK, atOpenIDOK)
 	if !ok {
 		t.Fatal("文字还在，仍算有内容可发")
 	}
@@ -120,7 +123,7 @@ func TestOnlyOneAtPerDelivery(t *testing.T) {
 		{T: BlockTypeAt, Name: "甲"},
 		{T: BlockTypeAt, Name: "乙"},
 		{T: BlockTypeText, C: "说句话"},
-	}, "", 5, atNameOK)
+	}, "", 5, atNameOK, atOpenIDOK)
 
 	plan := planDelivery(blocks, 40, 5)
 	if len(plan) != 1 {
@@ -138,7 +141,7 @@ func TestAtBeforeImageIsDropped(t *testing.T) {
 	blocks, _ := allowBlocks([]Block{
 		{T: BlockTypeAt, Name: "老张"},
 		{T: BlockTypeImg, ID: 42},
-	}, "", 5, atNameOK)
+	}, "", 5, atNameOK, atOpenIDOK)
 
 	plan := planDelivery(blocks, 40, 5)
 	for _, b := range plan {
@@ -156,7 +159,7 @@ func TestAtDoesNotConsumeSegmentBudget(t *testing.T) {
 	blocks, _ := allowBlocks([]Block{
 		{T: BlockTypeAt, Name: "老张"},
 		{T: BlockTypeText, C: "一句话"},
-	}, "", 5, atNameOK)
+	}, "", 5, atNameOK, atOpenIDOK)
 
 	plan := planDelivery(blocks, 40, 1)
 	if len(plan) != 1 {
@@ -215,6 +218,9 @@ func TestAtNameResolvesThroughMemberTable(t *testing.T) {
 	}, "", 5, func(n string) string {
 		oid, _ := lookupMemberOpenID(g, n)
 		return oid
+	}, func(openID string) bool {
+		_, known := g.MemberOf(openID)
+		return known
 	})
 	if !ok {
 		t.Fatal("应保留内容")

@@ -55,6 +55,12 @@ type Sender interface {
 	// SendGroupTo 指定这条回复要挂在谁的息下（replyToOpenID 为空则挂最新那条）。
 	// 多人同时说话时不指定，群里就分不清它到底在回谁。
 	SendGroupTo(ctx context.Context, groupID, content, replyToOpenID string) error
+	// SendGroupQuote 与 SendGroupTo 相同，但这条以**真正的引用气泡**发出去。
+	//
+	// 单独一个方法而不是给 SendGroupTo 加参数：引用是模型逐块决定的，
+	// 加参数会让所有调用点（包括认主口令那种一次性应答、
+	// 以及各处测试桩）都得跟着改，而那条路径本来就不该带引用。
+	SendGroupQuote(ctx context.Context, groupID, content, replyToOpenID string) error
 }
 
 // MediaRef 带发送人的媒体引用。
@@ -1005,6 +1011,10 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 		func(name string) string {
 			oid, _ := lookupMemberOpenID(g, name)
 			return oid
+		},
+		func(openID string) bool {
+			_, known := g.MemberOf(openID)
+			return known
 		})
 
 	// **一次模型调用只落一条决策日志。**
@@ -1433,6 +1443,7 @@ func (e *Engine) deliver(cfg config.Config, g *memory.Group, blocks []Block, rep
 	var sentTexts []string
 	sent := 0
 	imgUsed := 0
+	quoted := false
 	maxImg := cfg.MemePool.MaxImagesPerReply
 	if maxImg <= 0 {
 		maxImg = 1
@@ -1457,7 +1468,14 @@ func (e *Engine) deliver(cfg config.Config, g *memory.Group, blocks []Block, rep
 				sent++
 			}
 		default:
-			err = e.sender.SendGroupTo(ctx, g.OpenID, b.C, replyToOpenID)
+			// 引用是模型在这一块上开口要的（Q）。同一轮里最多第一条带引用：
+			// 真人不会连着两条都套引用卡片，那看着像在强调自己。
+			if b.Q && !quoted {
+				err = e.sender.SendGroupQuote(ctx, g.OpenID, b.C, replyToOpenID)
+				quoted = true
+			} else {
+				err = e.sender.SendGroupTo(ctx, g.OpenID, b.C, replyToOpenID)
+			}
 			if err == nil {
 				sentTexts = append(sentTexts, b.C)
 				sent++
@@ -1479,7 +1497,13 @@ func (e *Engine) deliver(cfg config.Config, g *memory.Group, blocks []Block, rep
 
 	// 记忆里只留文字。图片另起一条留痕——
 	// 不留的话模型下一轮不知道自己发过图，会在同一段对话里反复甩同一张。
-	g.MarkBotSpoke(strings.Join(sentTexts, " "))
+	//
+	// 写进去的是**还原后**的正文：艾特在出口是渲染好的平台标签
+	//（<qqbot-at-user id="…" />），原样存进去等于把裸 openid
+	// 记成「我刚说过的话」。模型下一轮读到就有样学样，而它手里的 openid
+	// 全是编的——2026-10-05 生产事故就是这么来的。换回 〔@名字〕：
+	// 抄写路径断了，「我艾特了谁」这个事实还在。
+	g.MarkBotSpoke(spokenForMemory(sentTexts, g))
 	if imgUsed > 0 {
 		g.Append(memory.Line{
 			TS: time.Now(), Role: memory.RoleBot,
@@ -1503,6 +1527,31 @@ func (e *Engine) deliver(cfg config.Config, g *memory.Group, blocks []Block, rep
 		"group", groupLabel(g), "条数", sent, "图", imgUsed,
 		"回给", toName, "内容", truncate(textOf(plan), 80), "急", eager)
 	return sent
+}
+
+// spokenForMemory 把已发出的原文转成写进记忆的形态：艾特标签换回「〔@名字〕」。
+//
+// 认不出来（成员表里没有这个人）就整个标签删掉——宁可少记一句，
+// 也别把一个模型编的 openid 存成它的口头禅。
+func spokenForMemory(sent []string, g *memory.Group) string {
+	parts := make([]string, 0, len(sent))
+	for _, s := range sent {
+		out := atTagInText.ReplaceAllStringFunc(s, func(tag string) string {
+			m := atTagInText.FindStringSubmatch(tag)
+			if len(m) != 2 || m[1] == "" {
+				return ""
+			}
+			name := g.NameOfByOpenID(m[1])
+			if name == "" {
+				return ""
+			}
+			return "〔@" + name + "〕"
+		})
+		if out = strings.TrimSpace(out); out != "" {
+			parts = append(parts, out)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // sendOneImage 发一张表情包。

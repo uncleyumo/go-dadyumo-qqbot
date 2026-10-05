@@ -53,7 +53,17 @@ type Member struct {
 	LastSeen time.Time `json:"last_seen"`
 	MsgCount int       `json:"msg_count"`
 	IsMaster bool      `json:"is_master"`
-	Note     string    `json:"note,omitempty"` // 模型自己记下的关于这个人的要点
+	// Role 是他在群里的身份：member / admin / owner，平台每个事件都带 member_role。
+	//
+	// 为什么以前不存：成员表当初只建了「怎么称呼他」，而身份看起来可以现查。
+	// 实际上查不到——没开「全量消息」的群里机器人只收到 @ 它的消息，
+	// 于是「谁是群主」对模型无解，它会答「不知道谁是群主」或者干脆演一个
+	// （2026-10-05 生产实况：后者，模型输出 JSON 残缺被按闭嘴处理）。
+	//
+	// 只会覆盖，不会累积：角色是会变的（管理员被撤了、群主转让），
+	// 所以拿到什么就记什么，不做历史。
+	Role string `json:"role,omitempty"`
+	Note string `json:"note,omitempty"` // 模型自己记下的关于这个人的要点
 
 	// Card 是他在群里的名片（群名片）。
 	//
@@ -689,6 +699,33 @@ func (g *Group) Facts() string {
 // TouchMember 记录某人说过话，并更新画像。name 是账号昵称。
 func (g *Group) TouchMember(openID, name string) {
 	g.touchMember(openID, name, "")
+}
+
+// TouchMemberRole 记录某人当前的身份（member/admin/owner）。
+//
+// 与 TouchMember 分开是因为平台给的是**另一个字段**（author.member_role），
+// 而且只有在他自己发言的事件里才有——别人 @ 他时 mentions 里的 MemberRole
+// 未必填。混进 TouchMember 就得为它加参数，而绝大多数调用点不关心身份。
+//
+// role 为空或认不出来时不写：宁可没有身份，也不要把「member」当成
+// 「确认是普通成员」存下来——它可能只是这次事件没带而已。
+func (g *Group) TouchMemberRole(openID, role string) {
+	switch role {
+	case "owner", "admin", "member":
+	default:
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.members == nil {
+		g.members = map[string]*Member{}
+	}
+	m, ok := g.members[openID]
+	if !ok {
+		m = &Member{OpenID: openID}
+		g.members[openID] = m
+	}
+	m.Role = role
 }
 
 // TouchMemberCard 记录某人被别人 @ 过，name 是群名片。

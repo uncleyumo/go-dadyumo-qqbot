@@ -214,6 +214,14 @@ func (s *Server) dispatch(p Payload) error {
 			logx.Warn("群消息事件解析失败", "err", err.Error(), "id", p.ID, "t", p.T)
 			return fmt.Errorf("群消息事件解析失败: %w", err)
 		}
+		// 原文只在 debug 下打。2026-10-05：引用气泡一直出不来，
+		// 而「平台到底有没有在群里消息的 message_scene.ext 里给 REFIDX」
+		// 只能从原文上看——反序列化后剩下的字段看不出「本来就没有」。
+		raw := string(p.D)
+		if len(raw) > 2000 {
+			raw = raw[:2000] + "…"
+		}
+		logx.Debug("群消息原文", "t", p.T, "raw", raw)
 		s.handler.OnGroupMessage(&ev, p.T == EventGroupAtMessage)
 	case EventC2CMessage:
 		var ev C2CMessage
