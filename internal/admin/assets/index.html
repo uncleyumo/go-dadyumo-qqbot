@@ -195,6 +195,9 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
 <main>
   <!-- ============ 概览 ============ -->
   <section id="p-overview">
+    <!-- 总开关放最顶上：它一旦关掉，整页其他数字（在线率、调度顺序、预算）
+         说的都是「它本来会怎么做」，而不是它现在在做什么。 -->
+    <div class="panel" id="pause-bar"></div>
     <div class="stats" id="stats"></div>
     <div class="panel" id="budget-bar"></div>
     <div class="panel hide" id="revhint" style="border-color:#c2410c;color:#c2410c">
@@ -376,14 +379,15 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
           <small class="hint">关掉 = 全天候同频在线。</small></div></div>
         <div class="row"><label>档位</label><div class="fld"><select id="sch-mode">
           <option value="daytime">白天为主（默认·白天几乎全在线）</option>
-          <option value="deepseek_offpeak">DeepSeek 错峰半价（省钱，白天只有 20%）</option>
+          <option value="deepseek_offpeak">DeepSeek 峰谷（工作日 9-12、14-18 高峰压到 20%）</option>
           <option value="night_owl">夜猫子</option>
           <option value="always">全天在 90%（日常档·仍有 10% 概率不接话）</option>
           <option value="always_strict">全天必应 100%（调试/特殊场景·不随机）</option>
           <option value="random_daily">每天随机（今天挑一段高活跃）</option>
           <option value="custom">自定义（用下面的窗口表）</option>
         </select>
-          <small class="hint">默认「白天为主」：错峰半价时段（00:30-08:30）群里没人，白天压活跃度只会让它不理人。<br>
+          <small class="hint">默认「白天为主」：DeepSeek 的高峰是<b>工作日 09:00-12:00、14:00-18:00</b>，正是群里最热闹的时候，
+            那会儿压活跃度只会让它不理人。<br>
             <b>「全天」有两档，别按名字猜</b>：<code>always</code> 是 90%（日常档，仍有 10% 概率不接话）；
             <code>always_strict</code> 才是 100% —— 它等于关掉了在线率闸门，等于废掉「它必须能闭嘴」那条约束，
             账单随群活跃度线性涨，<b>只用于调试或特殊场景，别长期用</b>。</small></div></div>
@@ -394,7 +398,9 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
       </div>
       <div class="muted" id="sch-now">当前：—</div>
       <div style="margin-top:8px">
-        <div class="muted">自定义窗口（仅档位选「自定义」时生效，支持跨午夜如 18:00→02:00）</div>
+        <div class="muted">自定义窗口（仅档位选「自定义」时生效，支持跨午夜如 18:00→02:00）<br>
+          「星期」列留空 = 每天；填 <code>1-5</code> 或 <code>6,7</code> 可把窗口限制在指定星期（1=周一…7=周日）。
+          同一个时刻有多行命中时，<b>表格里靠上的那行生效</b>，所以窄窗口要写在宽窗口前面。</div>
         <table id="sch-windows"><tbody></tbody></table>
         <button class="ghost sm" onclick="addScheduleWindow()">+ 加一个时段</button>
       </div>
@@ -595,6 +601,7 @@ async function loadState(force) {
   document.getElementById('uptime').textContent = '已运行 ' + s.uptime;
   renderStats(s);
   renderTargets();
+  renderPauseBar(s);
 
   if (accept) {
     renderEndpoints();
@@ -1624,6 +1631,46 @@ function renderGroups(s) {
   }).join('') || '<div class="muted">还没有收到任何群消息。</div>';
 }
 
+/* ================= 总开关 ================= */
+
+// renderPauseBar 画总览页顶部的启停状态条。
+//
+// 读的是 s.config.paused（每 5 秒轮询都会下发的完整配置快照），而不是内存里的
+// CFG：loadState 只在「rev 变了且用户没在编辑」时才接受服务端快照去换掉 CFG，
+// 所以正开着配置页编辑时 CFG 可能是旧的，而 s.config 永远是新鲜的。
+function renderPauseBar(s) {
+  const cfg = (s && s.config) || {};
+  const paused = !!cfg.paused;
+  const name = (cfg.persona && cfg.persona.name) || '机器人';
+  const el = document.getElementById('pause-bar');
+  el.style.borderColor = paused ? '#b91c1c' : '';
+  el.innerHTML = paused
+    ? `<h2 style="color:#b91c1c;margin:0">已关闭
+         <span class="hint">它现在是「不在场」：消息不接收、不记录、不回话，也不会调用任何模型，
+         后台的表情包优选同样停。这个状态存在 config.json 里，<b>重启或重新部署之后仍然是关闭</b>，
+         必须回这里手动开。</span></h2>
+       <div style="margin-top:8px"><button class="ghost sm" onclick="togglePause(false)">启动${esc(name)}</button></div>`
+    : `<h2 style="margin:0">运行中
+         <span class="hint">点右边的按钮可以把它彻底关掉（同机部署第二台机器人、或临时让它闭嘴时用）。
+         被 @ 和私聊也拦得住，一个模型调用都不会发生——只有控制台「测试模型」是你手动点的，不受影响。</span></h2>
+       <div style="margin-top:8px"><button class="ghost sm" onclick="togglePause(true)">关闭${esc(name)}</button></div>`;
+}
+
+// togglePause 切总开关。二次确认是刻意的：关掉之后它真的一个字都不会说，
+// 而最常见的困惑恰恰是「我到底关了没有」。
+async function togglePause(on) {
+  const name = (CFG && CFG.persona && CFG.persona.name) || '机器人';
+  const msg = on
+    ? `确定关闭${name}？\n\n关闭期间：不接收、不记录、不回话，不调用任何模型（表情包优选也停）。\n` +
+      `这个状态会写进 config.json——重新部署、重启、机器重启之后仍然是关闭，必须回控制台手动开。`
+    : `确定启动${name}？它下一条消息开始就会照常回话。`;
+  if (!confirm(msg)) return;
+  const j = await api('/api/pause', { on: on });
+  if (!j || !j.ok) { toast((j && j.msg) || '操作失败', true); return; }
+  toast(on ? '已关闭' : '已启动');
+  loadState();
+}
+
 /* ================= 在线时段 ================= */
 
 function renderSchedule(s) {
@@ -1638,21 +1685,25 @@ function renderSchedule(s) {
       <td><input value="${esc(w.from || '')}" placeholder="00:30" style="width:76px" data-sw="${i}" data-k="from"></td>
       <td><input value="${esc(w.to || '')}" placeholder="08:30" style="width:76px" data-sw="${i}" data-k="to"></td>
       <td><input type="number" step="0.05" min="0" max="1" value="${esc(w.rate ?? 0.2)}" style="width:70px" data-sw="${i}" data-k="rate"></td>
+      <td><input value="${esc(w.days || '')}" placeholder="每天" style="width:64px" data-sw="${i}" data-k="days"></td>
       <td><input value="${esc(w.label || '')}" placeholder="说明" data-sw="${i}" data-k="label"></td>
       <td><button class="ghost sm" onclick="delScheduleWindow(${i})">删</button></td>
     </tr>`).join('');
   if (s && s.schedule) {
     const v = s.schedule;
     const pct = Math.round((v.rate ?? 0) * 100);
+    // 总开关关着时先说清楚：下面这个在线率眼下不生效。
+    // 不写的话屏幕上会出现「在线率 80%」而它其实一句话都不会说，是误导。
+    const off = (s.config && s.config.paused) ? '⚠ 总开关已关闭，以下在线率当前不生效 —— ' : '';
     document.getElementById('sch-now').textContent =
-      `当前：${esc(v.label || '—')}，在线率 ${pct}%` + (v.enabled ? '' : '（未启用，全部放行）');
+      off + `当前：${esc(v.label || '—')}，在线率 ${pct}%` + (v.enabled ? '' : '（未启用，全部放行）');
   }
 }
 function addScheduleWindow() {
   UNSAVED = true;
   CFG.schedule = CFG.schedule || {};
   CFG.schedule.windows = CFG.schedule.windows || [];
-  CFG.schedule.windows.push({ from: '00:00', to: '08:00', rate: 0.5, label: '' });
+  CFG.schedule.windows.push({ from: '00:00', to: '08:00', rate: 0.5, label: '', days: '' });
   renderSchedule();
 }
 function delScheduleWindow(i) {
@@ -1671,7 +1722,7 @@ function collectSchedule() {
   const map = {};
   rows.forEach(el => {
     const i = +el.dataset.sw, k = el.dataset.k;
-    map[i] = map[i] || { from: '', to: '', rate: 0.2, label: '' };
+    map[i] = map[i] || { from: '', to: '', rate: 0.2, label: '', days: '' };
     if (k === 'rate') map[i][k] = parseFloat(el.value) || 0;
     else map[i][k] = el.value;
   });

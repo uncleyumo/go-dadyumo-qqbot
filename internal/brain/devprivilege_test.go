@@ -3,6 +3,7 @@ package brain
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"dadyumo/internal/config"
 	"dadyumo/internal/memory"
@@ -167,13 +168,15 @@ func TestDevPrivilegeOffNoMasterTagInHistory(t *testing.T) {
 	g.TouchMember("openid-zhang", "张三")
 	g.Append(memory.Line{Role: memory.RoleUser, Name: "张三",
 		OpenID: "openid-zhang", Content: "在吗"}, 20)
+	// 夹具的 TS 全是零值，now 取什么都不会产生时间标记
+	now := time.Now()
 
-	if out := renderLines(g, g.Recent(20), masterSet(g, cfg)); strings.Contains(out, "（开发者）") {
+	if out := renderLines(g, g.Recent(20), masterSet(g, cfg), now); strings.Contains(out, "（开发者）") {
 		t.Errorf("特权关闭时历史里不该打开发者标记，got: %s", out)
 	}
 	// 也不该出现「带（开发者）的是你的开发者」这句悬空说明
 	up := userPrompt(cfg, g, g.Recent(20),
-		buildTrigger(false, false, false, false, false, false, false, 1, "张三", false), "")
+		buildTrigger(false, false, false, false, false, false, false, 1, "张三", false), "", now)
 	if strings.Contains(up, "开发者") {
 		t.Errorf("特权关闭时 userPrompt 不该提开发者，got: %s", up)
 	}
@@ -190,13 +193,15 @@ func TestDevPrivilegeOnMarksHistory(t *testing.T) {
 	g.TouchMember("openid-zhang", "张三")
 	g.Append(memory.Line{Role: memory.RoleUser, Name: "张三",
 		OpenID: "openid-zhang", Content: "在吗"}, 20)
+	// 夹具的 TS 全是零值，now 取什么都不会产生时间标记
+	now := time.Now()
 
-	out := renderLines(g, g.Recent(20), masterSet(g, cfg))
+	out := renderLines(g, g.Recent(20), masterSet(g, cfg), now)
 	if !strings.Contains(out, "张三（开发者）") {
 		t.Errorf("特权开启时历史里应打开发者标记，got: %s", out)
 	}
 	up := userPrompt(cfg, g, g.Recent(20),
-		buildTrigger(false, false, false, false, false, false, false, 1, "张三", false), "")
+		buildTrigger(false, false, false, false, false, false, false, 1, "张三", false), "", now)
 	if !strings.Contains(up, "带（开发者）的是你的开发者") {
 		t.Errorf("特权开启时格式说明里应提到开发者标记，got: %s", up)
 	}
@@ -221,10 +226,11 @@ func TestMasterLegendMatchesActualTags(t *testing.T) {
 		g.TouchMember("openid-zhang", "张三")
 		g.Append(memory.Line{Role: memory.RoleUser, Name: "张三",
 			OpenID: "openid-zhang", Content: "在吗"}, 20)
+		now := time.Now()
 
-		hasTag := strings.Contains(renderLines(g, g.Recent(20), masterSet(g, cfg)), "（开发者）")
+		hasTag := strings.Contains(renderLines(g, g.Recent(20), masterSet(g, cfg), now), "（开发者）")
 		up := userPrompt(cfg, g, g.Recent(20),
-			buildTrigger(false, false, false, false, false, false, false, 1, "张三", false), "")
+			buildTrigger(false, false, false, false, false, false, false, 1, "张三", false), "", now)
 		hasLegend := strings.Contains(up, "带（开发者）的是你的开发者")
 
 		if hasTag != hasLegend {

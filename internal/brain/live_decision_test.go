@@ -88,7 +88,7 @@ func TestLiveDecisionAgainstRealModel(t *testing.T) {
 	g2 := memStore.Group("live-test-group", "")
 	lines := TrimHistory(g2.Recent(cfg.Brain.MaxHistory), 3000)
 	system := systemPrompt(cfg, g2, MoodSignal{}, "", "", "李四")
-	user := userPrompt(cfg, g2, lines, buildTrigger(true, false, false, false, false, false, false, 2, "李四", false), "")
+	user := userPrompt(cfg, g2, lines, buildTrigger(true, false, false, false, false, false, false, 2, "李四", false), "", time.Now())
 
 	if strings.Contains(user, "【") && strings.Contains(user, "（主人）") {
 		t.Log("提示词已包含主人标记")

@@ -204,6 +204,15 @@ func (r *Router) RestoreTargets(m map[string]statsdb.TargetState) {
 	}
 }
 
+// Paused 总开关是否处于关停状态。
+//
+// 存在的意义是让 memepool.Curator 能透过 ConfigSource 看到总开关——
+// 它是唯一一个不看群消息、自己到点就调模型的后台任务。
+// 这里只读配置、不缓存：关停要在下一轮立刻生效，不能等 Router.Reload。
+func (r *Router) Paused() bool {
+	return r.store.Get().Paused
+}
+
 // CheapestModel 返回当前可用的「最便宜」目标：接入点 id 与模型名。
 //
 // 配置里没有价格字段，所以这里的「便宜」是按本项目的档位约定推的：

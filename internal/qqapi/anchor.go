@@ -103,7 +103,15 @@ func (p *AnchorPool) Add(groupOpenID, msgID, senderOpenID, senderName, refIdx st
 // 多返回一个 refIdx（那条消息的引用 id，可能为空）：
 // 调用方拿它填 message_reference，就能发出真正的引用气泡而不只是被动挂靠。
 // 为空时整个字段省略——平台不给 refIdx 是常态，不该因此发不出去。
-func (p *AnchorPool) PickAndReserve(groupOpenID, preferSender string) (msgID, refIdx string, seq uint32, ok bool) {
+//
+// **matched 说返回的锚点是不是恰好属于 preferSender 那个人。**
+// 它唯一的作用是让调用方在「不是他」时把 refIdx 丢掉：
+// 引用气泡里出现一个陌生人的消息，比没有气泡糟糕得多——
+// 群里人会看到「他在引用别人」而内容明显是在回这个人。
+// 2026-10-06 生产实况：模型填的 to 指向一个刚说过话的人，
+// 而真正选中的是群里最新那条（另一个人），引用就这么挂错了。
+// msg_id 仍然用退回的那条（被动回复授权需要它，丢了就发不出去）。
+func (p *AnchorPool) PickAndReserve(groupOpenID, preferSender string) (msgID, refIdx string, seq uint32, ok, matched bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -116,9 +124,14 @@ func (p *AnchorPool) PickAndReserve(groupOpenID, preferSender string) (msgID, re
 	}
 	p.m[groupOpenID] = alive
 	if len(alive) == 0 {
-		return "", "", 0, false
+		return "", "", 0, false, false
 	}
 
+	// 「挂错人」只发生在一种情况：**指定了某人，但池里没有他的锚点**，
+	// 于是退回了群里最新那条——那是别人。
+	//
+	// 不指定（空串）时挂最新那条正是本意，不算错。
+	// 所以判据是「选中这条是不是就是他要的那个人」，而不是「有没有指定人」。
 	var target *anchor
 	if preferSender != "" {
 		// 倒序找：同一人的多条里取最新的一条，避免把额度浪费在快过期的旧消息上
@@ -132,10 +145,11 @@ func (p *AnchorPool) PickAndReserve(groupOpenID, preferSender string) (msgID, re
 	if target == nil {
 		target = alive[len(alive)-1]
 	}
+	matched = preferSender == "" || target.sender == preferSender
 
 	target.used++
 	target.seq++
-	return target.msgID, target.refIdx, target.seq, true
+	return target.msgID, target.refIdx, target.seq, true, matched
 }
 
 // Release 发送失败：把这次占用的回复额度还回去。

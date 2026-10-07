@@ -1,6 +1,7 @@
 package brain
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -9,22 +10,97 @@ import (
 
 func at(h, m int) time.Time { return time.Date(2026, 9, 30, h, m, 0, 0, time.Local) }
 
+// at() 的日期是周三——这个测试整套断言都建立在「工作日」上，
+// 所以先把它钉死：哪天有人改了 at() 的日子而没看这里，下面全会红得莫名其妙。
+func TestAtIsAWeekday(t *testing.T) {
+	t.Parallel()
+	if wd := at(12, 0).Weekday(); wd != time.Wednesday {
+		t.Fatalf("at() 应为周三（工作日），实际 %v。本文件的峰谷断言全依赖这一点", wd)
+	}
+}
+
+// TestOnlineRateDeepSeekOffPeak 峰谷档按 DeepSeek 官方口径走。
+//
+// 官方（api-docs.deepseek.com/quick_start/pricing 脚注 2）：
+// 峰 = 01:00-04:00 与 06:00-10:00 UTC，周一至周五，不含法定节假日；
+// 其余（含周末全天）半价。折成北京时间即工作日 09:00-12:00、14:00-18:00。
+//
+// 这条测试替换掉的是旧断言 00:30-08:30 —— 那是 2025-02「错峰优惠活动」的时段，
+// 活动早结束、定价规则也换成了峰谷定价，旧窗口在代码里躺到了 2026-10。
 func TestOnlineRateDeepSeekOffPeak(t *testing.T) {
+	t.Parallel()
 	s := config.ScheduleConfig{Enabled: true, Mode: "deepseek_offpeak", AtGraceSec: 300}
-	// 半价时段内：00:30-08:30
-	if r, _ := OnlineRate(s, at(3, 0)); r != 0.8 {
-		t.Fatalf("半价时段应 0.8, got %v", r)
+
+	// 谷时段：整夜、午休、傍晚之后
+	for _, hm := range [][2]int{{0, 0}, {3, 0}, {8, 59}, {12, 0}, {13, 59}, {18, 0}, {23, 59}} {
+		if r, _ := OnlineRate(s, at(hm[0], hm[1])); r != 0.8 {
+			t.Errorf("周三 %02d:%02d 属谷时段，应 0.80，实际 %v", hm[0], hm[1], r)
+		}
 	}
-	// 半价时段外
-	if r, _ := OnlineRate(s, at(14, 0)); r != 0.2 {
-		t.Fatalf("非半价应 0.2, got %v", r)
+	// 峰时段：压到 base_rate（未配置时 0.20），且标签要说清是峰
+	for _, hm := range [][2]int{{9, 0}, {11, 59}, {14, 0}, {17, 59}} {
+		r, label := OnlineRate(s, at(hm[0], hm[1]))
+		if r != 0.2 {
+			t.Errorf("周三 %02d:%02d 属峰时段，应压到 0.20，实际 %v", hm[0], hm[1], r)
+		}
+		if !strings.Contains(label, "峰") {
+			t.Errorf("周三 %02d:%02d 的标签 %q 没说是峰时段——日志里就靠它分辨当时贵不贵",
+				hm[0], hm[1], label)
+		}
 	}
-	// 边界：08:29 在、08:30 不在
-	if r, _ := OnlineRate(s, at(8, 29)); r != 0.8 {
-		t.Fatalf("08:29 应在半价内, got %v", r)
+}
+
+// TestDeepSeekPresetWeekendIsAllOffPeak 周末全天都是谷时段。
+//
+// 这是「峰窗口必须带 Days」的回归测试，也是旧写法最容易让人再踩一次的坑：
+// 不带工作日限制的话，周六周日下午——群里最热闹的时候——会被当成峰压到 20%，
+// 而 DeepSeek 那天根本不涨价。周末下午的机器人沉默，没人会联想到是这个原因。
+func TestDeepSeekPresetWeekendIsAllOffPeak(t *testing.T) {
+	t.Parallel()
+	s := config.ScheduleConfig{Enabled: true, Mode: "deepseek_offpeak"}
+	// 2026-10-03 是周六，2026-10-04 是周日
+	for _, day := range []int{3, 4} {
+		for _, h := range []int{0, 9, 10, 14, 17, 23} {
+			now := time.Date(2026, 10, day, h, 0, 0, 0, time.Local)
+			if r, label := OnlineRate(s, now); r != 0.8 {
+				t.Errorf("%v %02d:00 周末应全天谷时段 0.80，实际 %v（%q）",
+					now.Weekday(), h, r, label)
+			}
+		}
 	}
-	if r, _ := OnlineRate(s, at(8, 30)); r != 0.2 {
-		t.Fatalf("08:30 应出半价, got %v", r)
+}
+
+func TestDaysMatch(t *testing.T) {
+	t.Parallel()
+	// 2026-10-07 是周三，2026-10-10 是周六，2026-10-11 是周日
+	wed := time.Date(2026, 10, 7, 12, 0, 0, 0, time.Local)
+	sat := time.Date(2026, 10, 10, 12, 0, 0, 0, time.Local)
+	sun := time.Date(2026, 10, 11, 12, 0, 0, 0, time.Local)
+
+	cases := []struct {
+		days string
+		now  time.Time
+		want bool
+	}{
+		{"", sat, true},        // 空 = 每天，旧配置语义不变
+		{"1-5", wed, true},     // 工作日
+		{"1-5", sat, false},    // 周末不算工作日
+		{"1-5", sun, false},    // 周日是 7，不是 0——写成 0-4 的偏移就栽在这
+		{"6,7", sat, true},
+		{"6,7", sun, true},
+		{"7", sun, true},
+		{"7", wed, false},
+		{"3", wed, true},
+		{" 1-5 ", wed, true},   // 容忍空格
+		{"mon-fri", wed, false}, // 解析不出来 → 该窗口永不命中，而不是「每天生效」
+		{"0-5", wed, false},     // 0 越界
+		{"5-1", wed, false},     // 反区间不绕回
+		{"8", wed, false},
+	}
+	for _, c := range cases {
+		if got := daysMatch(c.now, c.days); got != c.want {
+			t.Errorf("daysMatch(%v, %q) = %v，应为 %v", c.now.Weekday(), c.days, got, c.want)
+		}
 	}
 }
 

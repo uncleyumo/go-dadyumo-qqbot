@@ -52,7 +52,7 @@ func TestLiveEmojiReadable(t *testing.T) {
 
 	system := systemPrompt(cfg, g, MoodSignal{}, "", "", "群友甲")
 	user := userPrompt(cfg, g, hist,
-		buildTrigger(false, false, false, false, false, false, false, 6, "群友甲", false), "")
+		buildTrigger(false, false, false, false, false, false, false, 6, "群友甲", false), "", time.Now())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()

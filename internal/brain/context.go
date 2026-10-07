@@ -1,6 +1,8 @@
 package brain
 
 import (
+	"time"
+
 	"dadyumo/internal/memory"
 )
 
@@ -63,7 +65,7 @@ func TrimHistory(lines []memory.Line, budget int) []memory.Line {
 	kept := make([]memory.Line, 0, len(lines))
 	used := 0
 	for i := len(lines) - 1; i >= 0; i-- {
-		cost := EstimateTokens(lines[i].Content) + EstimateTokens(lines[i].Name) + 8
+		cost := lineCost(lines, i)
 		if used+cost > budget && len(kept) > 0 {
 			break
 		}
@@ -75,6 +77,94 @@ func TrimHistory(lines []memory.Line, budget int) []memory.Line {
 		kept[i], kept[j] = kept[j], kept[i]
 	}
 	return kept
+}
+
+// lineOverheadBase 每条消息的固定渲染开销：「· 名字：内容」里的分隔符、
+// 可能的开发者标签、换行。历史里有大量「嗯」「在」这种一两个字的短消息，
+// 正文估不出来但前缀是实打实的 token。
+const lineOverheadBase = 8
+
+// 两档时间标记的渲染开销。
+//
+// 超窗只出时刻（"[14:00] "），比带间隔的（"[14:02 隔了3分钟] "）短一截，
+// 所以开销也低。分两档算而不是一律取最大值：真实群里超窗标记
+// （跨夜那种）零星出现，一律按最贵的算会让估算比实际高出一截，
+// 长期看就是把预算花在了不存在的东西上。
+//
+// 跨天多出的 "10-05 " 不单列：估算侧拿不到 now 判断是否跨天，
+// 而那 4 个字符相对 lineOverheadBase 本就微不足道。
+// 漏算它的后果是这几行略微超预算——由 lineOverheadBase 的余量吸收。
+const (
+	lineOverheadTimeClock = 6  // "[14:00] "
+	lineOverheadTimeGap   = 11 // "[14:02 隔了3分钟] "
+)
+
+// lineCost 估算第 i 条渲染后的开销。
+//
+// 必须把时间标记算进去，否则这里会系统性低估：静过一阵的群里
+// 每条都挂标记，30 条就是几百 token。低估的实际后果不是「超预算被拒」
+// （context_length_exceeded），而是这一轮白花钱直到被上游截断，
+// 且现象随群的活跃度剧烈波动，很难归因。
+//
+// 间隔按「与上一条比」，与 renderLines 的 timeMarkerAt 口径一致。
+// 首行没有上一条，用「距今很久」这个保守假设（按有标记计）。
+func lineCost(lines []memory.Line, i int) int {
+	n := EstimateTokens(lines[i].Content) + EstimateTokens(lines[i].Name) + lineOverheadBase
+	switch {
+	case hasTimeMarkerGap(lines, i):
+		n += lineOverheadTimeGap
+	case hasTimeMarkerClock(lines, i):
+		n += lineOverheadTimeClock
+	}
+	return n
+}
+
+// hasTimeMarkerGap 判断第 i 条会不会被打上「带间隔」的时间标记。
+//
+// 口径与 renderLines 的 timeMarkerAt 一致：间隔落在引用窗口内才带间隔，
+// 超过窗口只给时刻（那个数字对决策已无用，详见 timeMarkerAt 的注释）。
+func hasTimeMarkerGap(lines []memory.Line, i int) bool {
+	if lines[i].TS.IsZero() {
+		return false
+	}
+	prev := prevTimedLine(lines, i)
+	if prev.IsZero() {
+		// 首行：renderLines 拿它跟 now 比，估算侧拿不到 now，不猜。
+		// 下面 hasTimeMarkerClock 同样返回 false——两档都不算。
+		return false
+	}
+	gap := lines[i].TS.Sub(prev)
+	return gap >= timeMarkerThreshold && gap <= quoteWindow
+}
+
+// hasTimeMarkerClock 判断第 i 条会不会被打上「只带时刻」的时间标记。
+//
+// 首行返回 false（不猜）：renderLines 会给首行打标记（它跟 now 比），
+// 但估算侧拿不到 now，于是无从判断。**宁可漏算首行**——
+// 对每个窗口都白加一次的话，刷屏的群里每轮都多算 6 token，
+// 而实际一个标记都不会出现。首行的漏算由 lineOverheadBase 的余量兜。
+func hasTimeMarkerClock(lines []memory.Line, i int) bool {
+	if lines[i].TS.IsZero() {
+		return false
+	}
+	prev := prevTimedLine(lines, i)
+	if prev.IsZero() {
+		return false
+	}
+	return lines[i].TS.Sub(prev) >= timeMarkerThreshold
+}
+
+// prevTimedLine 往前找最近一条有时间的消息。
+//
+// 与 renderLines 里「零值 TS 不推进 prev」的口径一致：中间夹一条
+// 零值记录不该把间隔链条打断。
+func prevTimedLine(lines []memory.Line, i int) time.Time {
+	for j := i - 1; j >= 0; j-- {
+		if !lines[j].TS.IsZero() {
+			return lines[j].TS
+		}
+	}
+	return time.Time{}
 }
 
 // ContextBudget 计算这次请求能给历史留多少 token。

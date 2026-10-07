@@ -17,9 +17,9 @@ import (
 //     概率在线则表现为「白天偶尔冒泡、夜里话多一点」，更像真人作息。
 //  2. 被 @ 永远放行，且 @ 之后的宽限期里保持实时——被点名了还装死是最伤体验的。
 //
-// 注意：内置档位里的 deepseek_offpeak 虽然照着「半价 80% / 其余 20%」做，
-// 但并不适合当长期默认——半价时段是 00:30-08:30，那会儿群里根本没人，
-// 把白天压到 20% 只会让机器人在大家真正在聊的时候装死。
+// 注意：内置档位里的 deepseek_offpeak 虽然照着「谷时段 80% / 峰时段 20%」做，
+// 但并不适合当长期默认——峰时段是工作日 09:00-12:00 与 14:00-18:00，
+// 正好是群里真正在聊的时候，把这几段压到 20% 只会让机器人在大家说话时装死。
 // 所以默认档是 daytime：白天几乎全在线，凌晨（本就没人）才降到平时水平。
 //
 // 3. 「全天」有两个档，别混：
@@ -33,9 +33,27 @@ const baseOnlineRate = 0.20
 
 // 内置档位。改这里就能改管理端下拉里的选项。
 var schedulePresets = map[string][]config.ScheduleWindow{
-	// DeepSeek 错峰半价：北京时间 00:30-08:30（省钱优先，白天会明显安静）
+	// DeepSeek 峰谷定价（官方口径，2026-08-17 起）：高峰 = 01:00-04:00 与
+	// 06:00-10:00 UTC，**只算工作日**（周一至周五，法定节假日除外）；其余时间
+	// 一律半价，含周末全天。折成北京时间即峰 = 09:00-12:00、14:00-18:00。
+	//
+	// 这里曾写成 00:30-08:30 —— 那是 2025-02 的「错峰优惠活动」时段，活动早结束、
+	// 定价规则也换了一轮，但这条窗口在代码里躺到了 2026-10。现场表现很隐蔽：
+	// 选了这个档的人会发现机器人在中午和晚上（真正在聊的时候）沉默，午夜反倒话多。
+	//
+	// 峰窗口必须带 Days：不限工作日的话，**周末下午**会被当成峰压到 20%，
+	// 而 DeepSeek 那天根本不涨价——这是最容易让人再踩一次的坑。
+	// 法定节假日无法在本地判断（没有日历），工作日节假日会按峰处理，是已知偏差。
+	//
+	// 顺序即优先级：OnlineRate 取第一个命中的窗口，所以两条窄的峰窗口必须排在
+	// 兜底的全天谷窗口之前。调换顺序 = 改行为，别动。
+	//
+	// 峰时段 Rate 填 0 是**故意的**：0 表示「回落 base_rate」，即「贵的时候压到
+	// 平时水平」（默认 0.20），这样 base_rate 这个旋钮对这个档依然有效。
 	"deepseek_offpeak": {
-		{From: "00:30", To: "08:30", Rate: 0.80, Label: "DeepSeek 错峰半价时段"},
+		{From: "09:00", To: "12:00", Days: "1-5", Rate: 0, Label: "DeepSeek 峰时段（全价）"},
+		{From: "14:00", To: "18:00", Days: "1-5", Rate: 0, Label: "DeepSeek 峰时段（全价）"},
+		{From: "00:00", To: "24:00", Rate: 0.80, Label: "DeepSeek 谷时段（半价）"},
 	},
 	// 白天为主（默认）：群里有人说话的时段保持在线，凌晨降下来
 	"daytime": {
@@ -90,10 +108,13 @@ func parseClock(s string) (int, bool) {
 }
 
 // inWindow 判断时刻是否落在窗口内，支持跨午夜（比如 18:00-02:00）。
-// from==to 视为全天。
-func inWindow(now time.Time, from, to string) bool {
-	f, ok1 := parseClock(from)
-	t, ok2 := parseClock(to)
+// from==to 视为全天。窗口带 Days 时还要当天星期命中。
+func inWindow(now time.Time, w config.ScheduleWindow) bool {
+	if !daysMatch(now, w.Days) {
+		return false
+	}
+	f, ok1 := parseClock(w.From)
+	t, ok2 := parseClock(w.To)
 	if !ok1 || !ok2 {
 		return false
 	}
@@ -106,6 +127,46 @@ func inWindow(now time.Time, from, to string) bool {
 	}
 	// 跨午夜
 	return cur >= f || cur < t
+}
+
+// daysMatch 判断 now 的星期是否落在 days 描述里，days 为空表示每天都算。
+//
+// 语法：逗号分隔的 N 或 N-M，N 取 1~7，**1=周一 … 7=周日**（ISO 口径）。
+// 刻意不直接吃 Go 的 time.Weekday：它把周日算成 0，于是 "1-5" 会变成
+// 「周日到周四」——一位偏移，且偏移后覆盖面看着还挺合理，最难发现，所以这里显式换算。
+//
+// 解析不出来的写法一律返回 false（该窗口永不命中），与 parseClock 对非法
+// from/to 的处理保持一致：宁可这个窗口不生效，也不要让手误的 "mon-fri"
+// 被当成「每天生效」——那在管理端是看不出来的。
+func daysMatch(now time.Time, days string) bool {
+	days = strings.TrimSpace(days)
+	if days == "" {
+		return true
+	}
+	wd := int(now.Weekday())
+	if wd == 0 {
+		wd = 7 // 周日
+	}
+	for _, part := range strings.Split(days, ",") {
+		if lo, hi, ok := parseWeekdayRange(strings.TrimSpace(part)); ok && wd >= lo && wd <= hi {
+			return true
+		}
+	}
+	return false
+}
+
+// parseWeekdayRange 解析 "3" 或 "1-5" 为闭区间 [lo,hi]。非法返回 ok=false。
+func parseWeekdayRange(s string) (lo, hi int, ok bool) {
+	loStr, hiStr := s, s
+	if i := strings.IndexByte(s, '-'); i >= 0 {
+		loStr, hiStr = s[:i], s[i+1:]
+	}
+	a, err1 := strconv.Atoi(strings.TrimSpace(loStr))
+	b, err2 := strconv.Atoi(strings.TrimSpace(hiStr))
+	if err1 != nil || err2 != nil || a < 1 || a > 7 || b < 1 || b > 7 || a > b {
+		return 0, 0, false
+	}
+	return a, b, true
 }
 
 // windowsFor 按模式取出生效的窗口表
@@ -188,7 +249,7 @@ func OnlineRate(s config.ScheduleConfig, now time.Time) (float64, string) {
 		base = 1
 	}
 	for _, w := range windowsFor(s, now) {
-		if inWindow(now, w.From, w.To) {
+		if inWindow(now, w) {
 			rate := w.Rate
 			if rate <= 0 {
 				rate = base

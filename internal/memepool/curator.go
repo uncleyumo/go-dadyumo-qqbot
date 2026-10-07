@@ -36,6 +36,12 @@ type ConfigSource interface {
 	// CheapestModel 返回当前可用的最便宜模型名与它的接入点。
 	// 没有可用目标时返回空串。
 	CheapestModel() (endpointID, model string)
+	// Paused 是否处于总开关关停状态。
+	//
+	// 这个接口是 Curator 唯一能看到配置的窗口，所以关停判定必须从这里透出去：
+	// 优选是**唯一一个不看群消息、自己到点就调模型**的后台任务，
+	// 少了这个口子，用户按下「关闭」之后它照样每 6 小时烧一次 token。
+	Paused() bool
 }
 
 // NewCurator 构造优选任务
@@ -86,6 +92,12 @@ func (c *Curator) Start(ctx context.Context) {
 
 // runOnce 跑一轮。导出给测试直接调用。
 func (c *Curator) runOnce(ctx context.Context) {
+	// 总开关（闸门四）。判在 runOnce 而不只是 ticker 里，是因为测试与将来的
+	// 手动触发都直接调这里——只在 ticker 上拦截，绕过去就漏。
+	if c.store.Paused() {
+		logx.Info("表情包优选跳过：总开关已关闭")
+		return
+	}
 	pool := c.pool.Browse(time.Now())
 	if len(pool) == 0 {
 		return

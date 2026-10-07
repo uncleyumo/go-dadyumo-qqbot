@@ -147,7 +147,7 @@ func (c *Client) SendImage(ctx context.Context, groupOpenID string, data []byte,
 	// RichMediaMessage 不带 MsgID，挂不上被动回复），而表情包 @ 人没有意义，
 	// 不值得为它再往这份手写 JSON 里加一个字段。
 	if cfg.QQ.PreferPassive {
-		msgID, _, seq, ok := c.anchors.PickAndReserve(groupOpenID, replyToOpenID)
+		msgID, _, seq, ok, _ := c.anchors.PickAndReserve(groupOpenID, replyToOpenID)
 		if ok {
 			if !c.limiter.allow() {
 				c.anchors.Release(groupOpenID, msgID)

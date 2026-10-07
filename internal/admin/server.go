@@ -107,6 +107,7 @@ func (s *Server) Handler(prefix string) http.Handler {
 	mux.HandleFunc(prefix+"/api/login", s.handleLogin)
 	mux.HandleFunc(prefix+"/api/logout", s.handleLogout)
 	mux.HandleFunc(prefix+"/api/state", s.auth(s.handleState))
+	mux.HandleFunc(prefix+"/api/pause", s.auth(s.handlePause))
 	mux.HandleFunc(prefix+"/api/config", s.auth(s.handleSaveConfig))
 	mux.HandleFunc(prefix+"/api/toggle", s.auth(s.handleToggle))
 	mux.HandleFunc(prefix+"/api/reset", s.auth(s.handleReset))
@@ -260,14 +261,14 @@ type state struct {
 
 // groupView 一个群的运行状态
 type groupView struct {
-	OpenID      string            `json:"openid"`
-	Name        string            `json:"name"`  // 记忆里的名字（可能只是 openid 尾 8 位代号）
-	Alias       string            `json:"alias"` // 管理端设置的别名（config.groups），展示时优先于 Name
-	Left        bool              `json:"left"`  // 机器人已被移出该群（GROUP_DEL_ROBOT 事件标记）
-	Recent      int               `json:"recent"`
-	Idle        string            `json:"idle"`
-	MutedUntil  int64             `json:"muted_until"` // 静默截止时刻（Unix 秒），0 = 没在静默
-	LastBotText string            `json:"last_bot_text"`
+	OpenID      string `json:"openid"`
+	Name        string `json:"name"`  // 记忆里的名字（可能只是 openid 尾 8 位代号）
+	Alias       string `json:"alias"` // 管理端设置的别名（config.groups），展示时优先于 Name
+	Left        bool   `json:"left"`  // 机器人已被移出该群（GROUP_DEL_ROBOT 事件标记）
+	Recent      int    `json:"recent"`
+	Idle        string `json:"idle"`
+	MutedUntil  int64  `json:"muted_until"` // 静默截止时刻（Unix 秒），0 = 没在静默
+	LastBotText string `json:"last_bot_text"`
 	// Summary 是「前文提要」：模型压缩出来、已被 recent 窗口裁掉的那段历史。
 	// prompt.go 每轮都注入 user prompt，是模型知道「聊到哪了」的唯一来源——
 	// 也就是**最影响说话、却曾经完全不可见**的一块记忆。
@@ -276,10 +277,10 @@ type groupView struct {
 	Summary string `json:"summary"`
 	// TotalLines 是历史累计条数。Recent 会被裁，所以 Recent 变小不代表
 	// 聊天记录变少——两个一起显示才看得出「窗口里剩多少 / 一共聊过多少」。
-	TotalLines int `json:"total_lines"`
-	FactsItems  []memory.FactItem `json:"facts_items"` // 结构化长期要点（可编辑），按最后写入时间倒序
-	FactsMax    int               `json:"facts_max"`   // 上限，前端显示「已用 n/上限」
-	Members     []memory.Member   `json:"members"`
+	TotalLines int               `json:"total_lines"`
+	FactsItems []memory.FactItem `json:"facts_items"` // 结构化长期要点（可编辑），按最后写入时间倒序
+	FactsMax   int               `json:"facts_max"`   // 上限，前端显示「已用 n/上限」
+	Members    []memory.Member   `json:"members"`
 }
 
 // masterView 开发者绑定与特权情况
@@ -290,6 +291,14 @@ type masterView struct {
 	// DevEnabled 开发者特权开关。关着时（默认）开发者的消息与群友完全一样，
 	// 绑定列表照常维护——认人与特权是两件事。
 	DevEnabled bool `json:"dev_enabled"`
+	// BindEnabled 「允许口令绑定」开关。
+	//
+	// 必须下发：前端 renderMaster 用 `!!m.bind_enabled` 回填复选框，字段缺席时
+	// 读到的永远是 undefined → 勾永远被抹成未勾。现场表现是「勾了保存没用、
+	// 勾不上」——而保存其实成功了，是下一次重画把它擦了；更坏的是再保存一次
+	// 会把 unchecked 回传，等于**悄悄关掉刚开的开关**。
+	// 它是开关不是秘密，别和下面被 maskKey 的 bind_token 混为一谈。
+	BindEnabled bool `json:"bind_enabled"`
 }
 
 // logEntry 是 /api/state 里带的内存日志条目。
@@ -361,12 +370,12 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			}
 			left, _ := g.Left()
 			groups = append(groups, groupView{
-				OpenID:      g.OpenID,
-				Name:        g.Name,
-				Alias:       aliases[g.OpenID],
-				Left:        left,
-				Recent:      len(g.Recent(0)),
-				Idle:        g.IdleFor().Truncate(time.Second).String(),
+				OpenID: g.OpenID,
+				Name:   g.Name,
+				Alias:  aliases[g.OpenID],
+				Left:   left,
+				Recent: len(g.Recent(0)),
+				Idle:   g.IdleFor().Truncate(time.Second).String(),
 				// 已经过期的静默一律报 0：前端只靠这个字段决定画不画「静默中」，
 				// 报一个过去的截止时间会让界面显示「剩 -3 分钟」。
 				MutedUntil:  muteDeadline(g.MutedUntil()),
@@ -398,10 +407,11 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		Usage:   usage,
 		Groups:  groups,
 		Master: masterView{
-			Nickname:   cfg.Master.Nickname,
-			QQ:         cfg.Master.QQ,
-			OpenIDs:    cfg.Master.OpenIDs,
-			DevEnabled: cfg.Master.DevEnabled,
+			Nickname:    cfg.Master.Nickname,
+			QQ:          cfg.Master.QQ,
+			OpenIDs:     cfg.Master.OpenIDs,
+			DevEnabled:  cfg.Master.DevEnabled,
+			BindEnabled: cfg.Master.BindEnabled,
 		},
 		Schedule: func() scheduleView {
 			rate, label := brain.OnlineRate(cfg.Schedule, time.Now())
@@ -618,6 +628,15 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		if incoming.Groups == nil {
 			incoming.Groups = c.Groups
 		}
+		// 总开关不在配置表单里，永远以服务端现值为准。
+		//
+		// 这是本次唯一一处**必须**保留的字段，理由与上面那些「无表单字段被清零」
+		// 不同：paused 在页面上是有状态的（前端快照里带着 paused:false）。
+		// 用户关停机器人之后，只要回到配置页随手点一次「保存并生效」，
+		// 那份加载时的旧快照就会把 paused 写回 false —— 机器人**悄悄开机**，
+		// 没有任何报错，日志里也只是一条普通的「管理端已更新配置」。
+		// 想开回来只能走 POST /api/pause。
+		incoming.Paused = c.Paused
 		*c = incoming
 		return true, nil
 	}); err != nil {
@@ -627,6 +646,50 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	s.router.Reload()
 	logx.Info("管理端已更新配置并重载调用器")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handlePause 总开关：把整台机器人关掉 / 开回来。
+//
+// 状态落在 config.json 的 paused 字段上（走 store.Update，原子落盘），
+// 所以**跨进程重启保持**：关掉之后重新部署二进制、systemctl restart、
+// 甚至机器重启，它都不会自己开口。
+//
+// 与 handleToggle 的结构一致，两点不同：
+//   - 不调 router.Reload()：总开关不由 Router 缓存，各闸门每次现读 store。
+//   - 值没变时返回 false，`Update` 便不落盘、不 rev++（避免无意义的备份文件）。
+//
+// 副作用要知道：切换会 rev++，所以正开着配置页的人下次保存会撞乐观锁 409
+// （提示「配置已在别处被修改，请刷新」）。这是对的——页面那份快照确实过期了。
+func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		On *bool `json:"on"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.On == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "msg": "缺少 on 字段"})
+		return
+	}
+	on := *body.On
+	var before bool
+	err := s.store.Update(func(c *config.Config) (bool, error) {
+		before = c.Paused
+		if c.Paused == on {
+			return false, nil // 没变：不落盘、不 rev++
+		}
+		c.Paused = on
+		return true, nil
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "msg": err.Error()})
+		return
+	}
+	if before != on {
+		if on {
+			logx.Info("管理端关闭总开关", "说明", "机器人已停：不接收、不记录、不调模型")
+		} else {
+			logx.Info("管理端打开总开关", "说明", "机器人恢复运行")
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "paused": on})
 }
 
 func (s *Server) handleToggle(w http.ResponseWriter, r *http.Request) {
@@ -1002,6 +1065,7 @@ func (s *Server) handleMemoryClear(w http.ResponseWriter, r *http.Request) {
 	logx.Info("管理端已清空全部记忆", "groups", n, "backup", backup)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "groups": n, "backup": backup})
 }
+
 // 满了会按「最久没被写过」淘汰一条，被淘汰的 key 通过 evicted 返回，界面好提示。
 // handleGroupFactSet 新增或修改一条群长期要点。
 func (s *Server) handleGroupFactSet(w http.ResponseWriter, r *http.Request) {

@@ -2,6 +2,7 @@ package qqapi
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -14,7 +15,7 @@ func TestAnchorCarriesRefIdx(t *testing.T) {
 	p.Add("g1", "m1", "openid-a", "张三", "REFIDX_abc==")
 	p.Add("g1", "m2", "openid-b", "李四", "")
 
-	msgID, refIdx, _, ok := p.PickAndReserve("g1", "openid-a")
+	msgID, refIdx, _, ok, _ := p.PickAndReserve("g1", "openid-a")
 	if !ok {
 		t.Fatal("应能取到锚点")
 	}
@@ -30,7 +31,7 @@ func TestAnchorCarriesRefIdx(t *testing.T) {
 func TestAnchorRefIdxMayBeEmpty(t *testing.T) {
 	p := NewAnchorPool(20)
 	p.Add("g1", "m1", "openid-a", "张三", "")
-	_, refIdx, _, ok := p.PickAndReserve("g1", "openid-a")
+	_, refIdx, _, ok, _ := p.PickAndReserve("g1", "openid-a")
 	if !ok {
 		t.Fatal("缺 refIdx 不该影响锚点可用性")
 	}
@@ -48,7 +49,7 @@ func TestAnchorBackfillsRefIdxOnRedelivery(t *testing.T) {
 	p.Add("g1", "m1", "", "", "") // 先到：还不知道是谁，也没有 refIdx
 	p.Add("g1", "m1", "openid-a", "张三", "REFIDX_late==")
 
-	_, refIdx, _, _ := p.PickAndReserve("g1", "openid-a")
+	_, refIdx, _, _, _ := p.PickAndReserve("g1", "openid-a")
 	if refIdx != "REFIDX_late==" {
 		t.Errorf("补登时应把迟到的 refIdx 补上，实际 %q", refIdx)
 	}
@@ -94,4 +95,65 @@ func marshalMsg(t *testing.T, msg *dto.MessageToCreate) string {
 		t.Fatalf("序列化失败: %v", err)
 	}
 	return string(b)
+}
+
+// TestClientDropsRefIdxWhenNotMatched 客户端必须在 !matched 时丢掉 refIdx。
+//
+// 为什么用源码检查而不用运行时测试：sendGroup 要走真实 HTTP 才能观察到
+// 发出去的 JSON，代价远大于收益（项目里 gates_test.go 记着同一类权衡）。
+//
+// 为什么这条必须钉死：matched 算错了不会有任何编译错误或 panic，
+// 只是**引用气泡里静悄悄出现一个陌生人**——生产上只能靠人眼发现。
+// 变异测试确认过：把 sendGroup 里的 `if !matched { refIdx = "" }` 删掉，
+// 本包所有测试依然通过。
+func TestClientDropsRefIdxWhenNotMatched(t *testing.T) {
+	b, err := os.ReadFile("client.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := stripGoComments(string(b))
+
+	// matched 必须被接住（不是 _），否则这个判断等于没有
+	if !strings.Contains(src, "msgID, refIdx, seq, ok, matched := c.anchors.PickAndReserve") {
+		t.Error("sendGroup 没有接住 matched —— 防护被绕过了")
+	}
+	// 核心：不是他就不带气泡
+	if !strings.Contains(src, "if !matched {") {
+		t.Fatalf("sendGroup 必须在 !matched 时丢掉 refIdx；" +
+			"挂到别人消息上的引用气泡比没有气泡糟糕得多（生产上只能靠人眼发现）")
+	}
+	// 且这个清空必须发生在 post 之前
+	idxGuard := strings.Index(src, "if !matched {")
+	idxPost := strings.Index(src, "c.post(ctx")
+	if idxGuard < 0 || idxPost < 0 || idxGuard > idxPost {
+		t.Error("丢 refIdx 的判断必须放在 post 之前，否则请求已经发出去了")
+	}
+}
+
+// stripGoComments 剥掉 // 注释与 /* */ 块，避免注释里的字样被当成代码。
+func stripGoComments(src string) string {
+	var out []string
+	inBlock := false
+	for _, line := range strings.Split(src, "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case inBlock:
+			if strings.Contains(t, "*/") {
+				inBlock = false
+			}
+			continue
+		case strings.HasPrefix(t, "/*"):
+			if !strings.Contains(t, "*/") {
+				inBlock = true
+			}
+			continue
+		case strings.HasPrefix(t, "//"):
+			continue
+		}
+		if i := strings.Index(line, " //"); i >= 0 {
+			line = line[:i]
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }

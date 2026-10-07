@@ -152,9 +152,15 @@ func (c *Client) sendGroup(ctx context.Context, groupOpenID, content, replyToOpe
 	// 先看有没有锚点，再扣限流配额：发不出去的消息不该白吃一分钟的额度。
 	// PickAndReserve 同时完成了占用与取 seq，所以必须早于任何可能失败的发送动作。
 	if cfg.QQ.PreferPassive {
-		msgID, refIdx, seq, ok := c.anchors.PickAndReserve(groupOpenID, replyToOpenID)
+		msgID, refIdx, seq, ok, matched := c.anchors.PickAndReserve(groupOpenID, replyToOpenID)
 		// 模型没开口要引用就把 refIdx 丢掉：它不填进请求，消息照发，只是不带气泡。
 		if !quote {
+			refIdx = ""
+		}
+		// 挂靠到了**别人**的消息上（指定的人已经不在存活锚点里）。
+		// 这时绝不能带引用气泡：气泡里会出现一个陌生人，而内容明显是在回我
+		// 指定的那个人——群里人一眼就看出挂错了。宁可不带气泡。
+		if !matched {
 			refIdx = ""
 		}
 		if ok {

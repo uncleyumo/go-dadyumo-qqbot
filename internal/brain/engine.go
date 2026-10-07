@@ -285,6 +285,18 @@ func (e *Engine) OnMessage(ev *Event) {
 	if ev == nil || ev.GroupID == "" {
 		return
 	}
+	// 总开关（闸门一）。放在最前面，连 IsBot 的历史登记也一起跳过——
+	// 关停期间它「不在场」：不入记忆、不进统计、不排程，恢复后也不会补答。
+	// 队列侧的表现是：dispatch 返回 nil → runQueue 把这条消息文件删掉。
+	// 这是刻意的：被关掉两小时后突然开始回两小时前的话，比不说话更糟。
+	//
+	// 这一道拦不住**已经在途**的东西：关停前排好的攒批定时器照样会到点。
+	// 所以 fire() 里还有同一道闸，那道才是兜底的。
+	if e.store.Get().Paused {
+		logx.InfoCat(logx.CatDecision, "跳过：总开关已关闭",
+			"group", ev.GroupID, "位置", "消息入口")
+		return
+	}
 	if ev.TS.IsZero() {
 		ev.TS = time.Now()
 	}
@@ -578,6 +590,21 @@ func (e *Engine) fire(groupID string) {
 	st := e.stateOf(groupID)
 	cfg := e.store.Get()
 	g := e.mem.Group(groupID, "")
+
+	// 总开关（闸门二，兜底的那道）。OnMessage 只拦得住新消息，拦不住关停前
+	// 就已经排好的攒批定时器（st.timer 是 time.AfterFunc），它会照常把 fire 叫起来。
+	// 这一道同时罩住下面整条链路：媒体管道（transcribeVoices / handleVideos →
+	// asr.go / video.go / compact.go，都是绕开 Router 的裸 http.Client）、
+	// 决策、发言——它们全在 fire 之后。
+	//
+	// 不放在 Router.Chat 里：那里返回错误会被 decide 当成「所有目标都失败」，
+	// 转而发出 persona 兜底话术，等于关停期间机器人自己开口。判定必须发生在
+	// 「要不要做这件事」这层，不是「调用失败了怎么办」那层。
+	if cfg.Paused {
+		logx.InfoCat(logx.CatDecision, "跳过：总开关已关闭",
+			"group", groupLabel(g), "位置", "攒批到期")
+		return
+	}
 
 	st.mu.Lock()
 	if st.firing {
@@ -901,7 +928,7 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 			"这轮给你看了 %d 张图，序号 1 到 %d（按你看到的顺序）。看到有梗的，用 collect 报给我。", len(dataURLs), len(dataURLs)))
 	}
 
-	user := userPrompt(cfg, g, lines, trigger, strings.Join(notes, ""))
+	user := userPrompt(cfg, g, lines, trigger, strings.Join(notes, ""), now)
 
 	start := time.Now()
 	res, rounds, err := e.chatWithTools(ctx, cfg, system, user, dataURLs, g)
@@ -1319,6 +1346,13 @@ func (e *Engine) fetchImages(urls []string, limit, maxSide, gifFrames int) ([]st
 // 撞上模型上下文上限。折中办法是定期把旧段落压成几句话——
 // 一次摘要大约几百 token，换掉的是后续每轮都少喂几千 token。
 func (e *Engine) maybeSummarize(cfg config.Config, g *memory.Group) {
+	// 总开关（闸门三）。这里是回复发出之后异步跑的（go e.maybeSummarize），
+	// 关停正好卡在「decide 结束」和「这个 goroutine 真正执行」之间时，
+	// 前面的闸门全都拦不住它，而它会直接调 router.Chat。
+	// 下面那个 allowCall 只看预算，不看总开关，补不了这一课。
+	if cfg.Paused {
+		return
+	}
 	every := cfg.Brain.SummaryEvery
 	if every <= 0 {
 		return

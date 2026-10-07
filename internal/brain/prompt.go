@@ -3,6 +3,7 @@ package brain
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"dadyumo/internal/config"
 	"dadyumo/internal/memory"
@@ -90,8 +91,14 @@ func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHin
 
 	// ===== 以下为固定段，逐轮不变，务必保持字节级稳定 =====
 
-	sb.WriteString(fmt.Sprintf("你叫%s。你是这个群里一个真实的人。\n", name))
-	sb.WriteString("你不是助手，不是客服，不是AI，你就是群里那个天天泡着的老东西。\n\n")
+	// 固定段里**不许出现某个具体人设的特征词**。这里原来写的是
+	// 「你就是群里那个天天泡着的老东西」——「老东西」是 v1 人设（嘴臭的老东西）
+	// 留下的残渣，对老爹勉强说得通，第二台机器人（羽沫奶酱，一个大学生）
+	// 照读就成了「我是老东西」，直接与 persona.background 自相矛盾，
+	// 而且是在固定段里每轮都刷。改成中性的「群里的一个普通人」，
+	// 具体是谁由【你是谁】那一节（persona.background）负责。
+	sb.WriteString(fmt.Sprintf("你叫%s，是群里一个真实的人。\n", name))
+	sb.WriteString("你不是助手，不是客服，不是AI，你就是群里的一个普通人。\n\n")
 
 	if p.Background != "" {
 		sb.WriteString("【你是谁】\n" + p.Background + "\n\n")
@@ -235,6 +242,38 @@ func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHin
 	sb.WriteString("你在群里说的话，默认就是一个普通气泡泡在聊天流里，**看不出你在回谁**。想让别人一眼看到你在回哪一句，得靠下面这两样。\n")
 	sb.WriteString("要真的把某个人叫出来，在 blocks 里加一个 at 块：{\"t\":\"at\",\"name\":\"群名片\"}，name 一字不差地照抄聊天记录里出现的名字。只在「群里的事跟他有关、需要他知道」时才用——你俩对同一个东西有反应、或者他发了张图你在评价。凑热闹、刷存在感、一轮里艾特别的人都别做。\n")
 	sb.WriteString("要让这条话挂在对方那句话上（引用气泡），在那个 text 块里加 \"q\":true。只在「你这句话是专门冲着那一句去的」时才用——反驳他、纠正他、接他那个梗、或者那句话本身就好笑值得圈出来。随口接话、换个话题、连着说自己的，就别用。一轮里最多第一条用。\n")
+	// 「隔久了就更该引用」是引用最主要的真实用途，而原来那一句只讲了
+	// 「针对某一句」这个笼统条件，模型在攒批窗口里回一条 20 分钟前的话时
+	// 未必意识到自己正处在最需要引用的场景里（群里已经滚过去一堆消息）。
+	//
+	// 5 分钟那个上限是硬事实，必须写进去：passiveTTL 就是 5 分钟，
+	// 锚点过期后取不到 refIdx，q:true 会**静默失效**——消息照发、只是没有气泡，
+	// 而模型会以为自己引用成功了。
+	//
+	// 超窗那半句刻意**不写「别拿旧话题来接」**：旧话题能不能聊跟能不能引用
+	// 是两回事，2026-10-06 用户明确指出过这点（他担心的「反复问没话找话」
+	// 是主动话多的行为问题，不是引用问题）。这里只说引用能力的边界。
+	// 下面这段是 2026-10-06 补的「引用到底能引哪一条」。
+	//
+	// 起因是用户在群里连着要求「引用刚才那条老消息」，而机器人每次都把
+	// **他刚发的那句**原样引回来，看着像在敷衍。根因不在提示词，在机制：
+	// 锚点池按「人」选，模型填的 to 解析成 openid 之后取的是**那个人最近的一条**
+	// 存活锚点——模型没有任何字段能指定「引他第几条」。
+	//
+	// 所以必须如实告诉模型「引用就是引他最新那句」。不给这条，它会一直
+	// 以为自己在引想引的那句，于是反复要求、被反复失败。
+	// 说清之后它至少知道自己做不到，可以改用 at 块或直接点名字。
+	sb.WriteString("关于引用要说清一件事，免得你白费劲：q:true 圈出来的是**那个人最新发的那条消息**，不是你想引用的某一句老话。你没法指定引他的第几条——所以想回他哪句旧话时，q:true 帮不上你，改成用 at 块叫他人，或者正文里直接说「你刚说的那个」。\n")
+	// 「隔久了就更该引用」这个直觉本身是对的，但必须跟上面那条合并着说，
+	// 否则模型会以为时间标记能帮它选到某一句。
+	sb.WriteString("聊天记录里带「[时刻 隔了多久]」标记的行，说明那句话已经过去一阵子了，群里这会儿已经滚过别的消息了。这时候别人可能已经看不出你在回哪句，如果你要的正是圈住那句，就带上 \"q\":true——只要这个人最近那条就是它。\n")
+	// 5 分钟那个上限是硬事实：锚点池 TTL 就是 5 分钟（也是平台的被动回复授权
+	// 窗口），超窗的人连「最近那条」都取不到，q:true 会**静默失效**——
+	// 消息照发、只是没有气泡，而模型会以为自己引用成功了。
+	//
+	// 超窗那半句刻意**不写「别拿旧话题来接」**：旧话题能不能聊跟能不能引用
+	// 是两件事（2026-10-06 用户明确指出过）。这里只说引用能力的边界。
+	sb.WriteString("最后：这个圈只能圈 5 分钟内发的话，超时太久就取不到了。超了就别塞 \"q\"，老老实实说话。\n")
 	// 这条保留原事故的教训：不再是「你压根做不到」，
 	// 而是「@全体成员 这个动作你做不到，别演」。
 	sb.WriteString("@全体成员 你做不到（一个都艾特不出）。谁让你帮忙艾特全员，就直说「你自己喊」，别学聊天记录里那些 @全体成员 的字样。\n\n")
@@ -365,17 +404,25 @@ func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHin
 // 分层是长期运行下省 token 的关键：摘要把「更早发生了什么」压成几句话，
 // 原文只保留最近这一小截。lines 必须是已经过 token 预算裁剪的历史，
 // 不能再是原始全量窗口。
-func userPrompt(cfg config.Config, g *memory.Group, lines []memory.Line, trigger, imageNote string) string {
+//
+// now 只用于渲染行首的时间标记（见 timeMarkerAt），不参与任何判断。
+func userPrompt(cfg config.Config, g *memory.Group, lines []memory.Line, trigger, imageNote string, now time.Time) string {
 	var sb strings.Builder
 	if s := g.Summary(); s != "" {
 		sb.WriteString("【更早之前这群的提要】\n" + s + "\n\n")
 	}
 	masters := masterSet(g, cfg)
-	recent := renderLines(g, lines, masters)
+	recent := renderLines(g, lines, masters, now)
 	if recent != "" {
 		sb.WriteString("【群里最近在聊】\n每行格式是「· 名字：说的话」" + masterLegend(masters) + "。\n" +
 			"这个名字就是这个人现在在群里的称呼，你填 to 时必须**一字不差地照抄**，抄错就等于当着全群回错了人。\n" +
-			"名字后面带一串「·字母数字」的，是因为群里有几个人用了同一个昵称，后缀不能漏。\n" + recent + "\n\n")
+			"名字后面带一串「·字母数字」的，是因为群里有几个人用了同一个昵称，后缀不能漏。\n" +
+			// 时间标记的说明必须与 timeMarkerAt 的实际行为严格一致：
+			// 两档格式、跨天才带日期，说清了模型才不会去数没标记的行。
+			"有的行前面会带一对方括号：刚刚隔过一阵的会写成「[14:02 隔了3分钟]」，很久以前的那条只写时刻「[10-05 22:49]」（带了日期说明是前几天的事）。带日期的说明那已经是很久以前，当成背景就行，别当现在的话题。\n" +
+			// 「隔了多久」只出现在几分钟内的那种——因为只有那个区间才引得到。
+			"标了「隔了多久」的那几句，是这会儿真正该接的话：你要是冲着其中某一句去，就用下面说的引用气泡把它圈出来。\n" +
+			recent + "\n\n")
 	}
 	if facts := g.Facts(); facts != "" {
 		sb.WriteString("【你记得的关于这个群的事】\n" + facts + "\n\n")
@@ -551,10 +598,16 @@ func displayNameOf(openIDToToken map[string]string, l memory.Line) string {
 //
 // 说话人前缀用「· 名字：」而不是「【名字】」：【】是提示词里分段用的，
 // 留给不可信的群消息就等于允许伪造分段。
-func renderLines(g *memory.Group, lines []memory.Line, masters map[string]bool) string {
+//
+// now 用于计算行首的时间标记，见 timeMarkerAt。
+func renderLines(g *memory.Group, lines []memory.Line, masters map[string]bool, now time.Time) string {
 	_, openIDToToken := personTokens(g)
 	var sb strings.Builder
+	// prev 是「上一条有时间的消息」。零值 TS 的行不更新它——
+	// 让它把链条打断的话，后面每条都会误判成隔了很久。
+	var prev time.Time
 	for _, l := range lines {
+		sb.WriteString(timeMarkerAt(prev, l.TS, now))
 		switch l.Role {
 		case memory.RoleBot:
 			sb.WriteString("· 你：" + sanitizeChatText(l.Content) + "\n")
@@ -568,8 +621,95 @@ func renderLines(g *memory.Group, lines []memory.Line, masters map[string]bool) 
 			}
 			sb.WriteString("· " + sanitizeChatText(name) + tag + "：" + sanitizeChatText(l.Content) + "\n")
 		}
+		if !l.TS.IsZero() {
+			prev = l.TS
+		}
 	}
 	return strings.TrimRight(sb.String(), "\n")
+}
+
+// timeMarkerThreshold 两条消息的间隔超过这么久，就在后一条前面加时间标记。
+//
+// 为什么是 90 秒而不是任何更小的值：一群人一分钟能刷七八条，
+// 阈值低了会让每行都挂上标记，那既是几十个 token 的纯开销，
+// 也把「这里真的静了一阵」这个信号稀释成了背景噪音。
+// 90 秒是「一轮对话的正常节奏已经断了」的分界。
+const timeMarkerThreshold = 90 * time.Second
+
+// quoteWindow 是引用气泡还能生效的时间上限，也就是 qqapi.passiveTTL。
+//
+// 超过它锚点就过期，message_reference 取不到，q:true 会**静默失效**——
+// 消息照发但没有气泡，而模型以为成功了。所以它是本项目里唯一一条
+// 「不是我们能改的平台硬限」，提示词里必须如实写给模型。
+const quoteWindow = 5 * time.Minute
+
+// timeMarkerAt 返回这一行该有的时间标记，不需要时返回空串。
+//
+// 为什么要有它：模型原来只能看到一串没有时间的对话，它无从判断
+// 「我准备回的那句话已经过去多久了」。而这恰好是引用气泡的唯一判据——
+// 隔着半小时回一句，不引用的话群里根本看不出你在回哪句。
+//
+// 口径是「这一条距上一条隔了多久」，不是「距现在」：
+// 前者直接对应「刚才那阵沉默」，后者会让每一行的标记都在缓慢变老，
+// 把「群里的时间轴」和「此刻」这两件事搅在一起。首行没有上一条，
+// 退化成跟现在比——那正好回答了「这些消息有多旧」。
+//
+// **「隔了多久」只在引用窗口内给**，超窗只给时刻。三个理由：
+//  1. 超窗时那个数字对决策已经无用（引不到），只剩噪音
+//  2. 让模型自己做减法判断「606 分钟 > 5 分钟吗」不可靠，
+//     小模型算错量就会去硬填 q:true
+//  3. 时刻配系统段里已有的「现在时间」，模型能一眼看出远近
+//
+// 跨天必须带日期：08:55 看到「22:49」分不清是今天还是昨天，
+// 纯时刻会让跨夜的消息看起来像未来。日内则省掉日期（省 token）。
+//
+// 零值 TS（测试夹具、老记录）一律不打标记：渲染不出时间的行
+// 不该得到一个凭空的时间，公元 1 年只会让模型困惑。
+func timeMarkerAt(prev, cur, now time.Time) string {
+	if cur.IsZero() {
+		return ""
+	}
+	gap := now.Sub(cur)
+	if !prev.IsZero() {
+		gap = cur.Sub(prev)
+	}
+	// 时钟漂移或平台时间戳异常会算出负间隔，那不是「间隔很短」，是数据有问题。
+	if gap < timeMarkerThreshold {
+		return ""
+	}
+	stamp := cur.Format("15:04")
+	// 跨天补日期：同一天内的「22:49」模型能靠系统段的现在时间自行定位，
+	// 跨天的「22:49」它会当成还没到的将来。
+	if !sameDay(cur, now) {
+		stamp = cur.Format("01-02") + " " + stamp
+	}
+	if gap <= quoteWindow {
+		return "[" + stamp + " 隔了" + humanGap(gap) + "] "
+	}
+	// 超窗：只给时刻，不给「隔了多久」。
+	return "[" + stamp + "] "
+}
+
+// sameDay 判断两个时间是否同一天（本地时区）。
+func sameDay(a, b time.Time) bool {
+	ay, am, ad := a.Date()
+	by, bm, bd := b.Date()
+	return ay == by && am == bm && ad == bd
+}
+
+// humanGap 把间隔说成人话。
+//
+// 只在 quoteWindow 内调用，所以只会出「分钟」这一档。
+// 保留分档结构是为了万一将来窗口放宽，这里不用重写。
+func humanGap(d time.Duration) string {
+	switch {
+	case d < 2*time.Hour:
+		return fmt.Sprintf("%d分钟", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%d小时", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%d天", int(d.Hours()/24))
+	}
 }
 
 // renderMemberNotes 把成员备注渲染出来，只带有备注的人。

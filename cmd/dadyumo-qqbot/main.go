@@ -48,7 +48,10 @@ func main() {
 	if *debug {
 		logx.SetLevel(logx.LevelDebug)
 	}
-	logx.Info("羽沫老爹启动中", "version", version)
+	// 这里不能写具体的机器人名。同机跑第二台（羽沫奶酱）时，
+	// 两台的启动日志都会写着「羽沫老爹启动中」，排查时第一步就被带偏。
+	// 名字要等配置读进来才知道，所以放在下面那行「配置已加载」里带出去。
+	logx.Info("进程启动中", "version", version)
 
 	store, err := config.Load(*cfgPath)
 	if err != nil {
@@ -56,11 +59,27 @@ func main() {
 		os.Exit(1)
 	}
 	cfg := store.Get()
-	logx.Info("配置已加载", "path", *cfgPath, "appid", cfg.QQ.AppID, "sandbox", cfg.QQ.Sandbox)
+	botName := cfg.Persona.Name
+	if botName == "" {
+		botName = "（人设未命名）"
+	}
+	logx.Info("配置已加载", "机器人", botName, "path", *cfgPath,
+		"appid", cfg.QQ.AppID, "sandbox", cfg.QQ.Sandbox)
 	// 档位名不认识时必须显式告警：windowsFor 对未知 mode 是静默回落 daytime 的，
 	// 现场表现只是「话变少了」，没人会想到是档位名写错或被改名。
 	// 校验放在启动时而不是 config.Validate 里，是因为 brain 已 import config，
 	// 反向 import 会成环——这里 main 同时看得见两边。
+	// 总开关处于关停状态时必须显眼地喊一声。
+	//
+	// 这个状态是**持久化**的（关掉之后重新部署、重启、甚至机器重启都还是关的），
+	// 于是最常见的现场问题是「它怎么一句话都不说」——而进程活着、QQ 通道正常、
+	// 配置也没错，唯一的原因就藏在 config.json 的一个 bool 里。
+	// 启动日志是排查的第一站，这一行必须让人不用翻配置文件就能找到答案。
+	if cfg.Paused {
+		logx.Warn("总开关处于关闭状态：本次启动不会调用任何模型",
+			"说明", "消息不接收、不记录、不回话，表情包优选也停",
+			"恢复", "打开管理端控制台总览页，点「启动」；或改 config.json 的 paused=false")
+	}
 	if !brain.KnownScheduleMode(cfg.Schedule.Mode) {
 		logx.Warn("schedule.mode 不认识，将按 daytime 处理",
 			"mode", cfg.Schedule.Mode,

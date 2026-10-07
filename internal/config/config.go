@@ -16,6 +16,23 @@ import (
 
 // Config 根配置
 type Config struct {
+	// Paused 总开关：true = 机器人彻底关闭，不接收、不记录、不调模型。
+	//
+	// 与 Schedule.Enabled 不是一回事：那个答的是「这会儿人在不在电脑前」，
+	// 按概率放行、随时段自己变；这个答的是「这台机器人现在上不上班」，
+	// 按下就锁死，用于同机部署第二台机器人、或临时让它闭嘴的场景。
+	//
+	// 放在根配置而不是某个子配置里，是因为它管的不止对话：表情包优选的后台
+	// 定时器、语音转写、视频理解都得跟着停，那些分属不同子系统。
+	//
+	// ⚠️ 这个字段**不允许在管理端的配置表单里修改**：handleSaveConfig 会用服务端的
+	// 现值覆盖客户端传来的值。否则页面里那份「加载时快照」（paused:false）会在你
+	// 关停之后、随便点一次「保存并生效」时把它**悄悄开机**——现场表现是
+	// 「我明明关了它怎么又说话了」，且没有任何报错。只能走 POST /api/pause。
+	//
+	// 闸门分布在 brain.Engine.OnMessage / fire / maybeSummarize 与
+	// memepool.Curator.runOnce 四处，见各处的注释。
+	Paused   bool           `json:"paused"`
 	Server   ServerConfig   `json:"server"`
 	QQ       QQConfig       `json:"qq"`
 	Admin    AdminConfig    `json:"admin"`
@@ -405,14 +422,21 @@ type ScheduleWindow struct {
 	To    string  `json:"to"`    // HH:MM，支持跨午夜（如 18:00-02:00）
 	Rate  float64 `json:"rate"`  // 0~1 在线率
 	Label string  `json:"label"` // 展示用说明
+	// Days 限定这条窗口在星期几生效：逗号分隔的 1~7（1=周一 … 7=周日），
+	// 支持区间如 "1-5"。空 = 每天，也就是不写这个字段的旧配置语义完全不变。
+	//
+	// 存在的唯一理由：DeepSeek 的峰时段只覆盖工作日，而 deepseek_offpeak 档
+	// 就是照着它的峰谷定价做的（见 brain.schedulePresets）。别的档位用不上它。
+	// 写错格式（如 "mon-fri"）时该窗口永不命中——见 brain.daysMatch 的说明。
+	Days string `json:"days,omitempty"`
 }
 
 // ScheduleConfig 在线时段调度。
 //
-// 内置档位里有 deepseek_offpeak（半价时段 80%、其余 20%），但**不建议**当长期默认：
-// DeepSeek 的错峰半价在 00:30-08:30，正好是群里没人说话的时候；把白天的在线率压到 20%
-// 只会让机器人在你真正在聊的时段装死。所以默认档用 daytime——白天几乎全在线，
-// 凌晨（本来就没人的时候）才降下来，省钱和体感两头都照顾到。
+// 内置档位里有 deepseek_offpeak（谷时段 80%、峰时段回落 base_rate），但**不建议**当长期默认：
+// DeepSeek 的峰时段是工作日 09:00-12:00 与 14:00-18:00，正好是群里最热闹的时候；
+// 把这几段的在线率压到 20% 只会让机器人在你真正在聊的时段装死。所以默认档用 daytime——
+// 白天几乎全在线，凌晨（本来就没人的时候）才降下来，省钱和体感两头都照顾到。
 //
 // ⚠️ 「全天」有两个档，别按名字猜：always 是 0.90（日常档，仍有 10% 概率不接话），
 // always_strict 才是 1.00（调试/特殊场景，任何时候都必应）。
