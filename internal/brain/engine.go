@@ -117,7 +117,15 @@ type Event struct {
 
 	AtMe  bool
 	IsBot bool
-	TS    time.Time
+
+	// IsPeerBot 表示这条是**同群另一台机器人**发的（不是自己）。
+	//
+	// 与 IsBot 严格区分：IsBot 的语义是「自己说过的话」，OnMessage 会把它记成
+	// RoleBot 后直接返回；这一条要当普通群友走完全程（登记成员、进上下文、能触发），
+	// 只是触发时要吃 PeerBotReplyRate 那道闸。两者混用会把对方的话吞掉。
+	IsPeerBot bool
+
+	TS time.Time
 }
 
 // c2cPrefix 单聊会话的内部前缀（与 agent 保持一致）
@@ -226,6 +234,13 @@ type groupState struct {
 	// 发送层也只能把回复挂到群里最新那条上——这就是认错人的根源。
 	triggerOpenID string
 	triggerName   string
+
+	// lastIsPeerBot：本批**最后一条**消息是同群另一台机器人发的。
+	//
+	// 与上面那些标志不同，它每来一条消息就覆盖一次，不做 sticky 累积——
+	// 问的是「现在是谁在把话头递过来」，不是「这批里有没有出现过对方」。
+	// 真人紧跟着插一句就把闸门放开：对方说、有人接、它再回，是正常的一轮。
+	lastIsPeerBot bool
 
 	// atAll：本批里有人 @ 了全体成员。
 	// 它不是「在跟机器人说话」，所以不参与 recordTrigger 的优先级，
@@ -386,6 +401,8 @@ func (e *Engine) OnMessage(ev *Event) {
 		st.atAll = true
 	}
 	st.recordTrigger(g, ev.OpenID, ev.Name, ev.AtMe, nameCalled, isDev, ev.MentionTarget)
+	// 覆盖式：问的是「最后说话的是不是另一台机器人」
+	st.lastIsPeerBot = ev.IsPeerBot
 	if question {
 		st.question = true
 	}
@@ -621,6 +638,7 @@ func (e *Engine) fire(groupID string) {
 	fromMaster := st.fromMaster
 	question := st.question
 	replyToBot := st.replyToBot
+	lastIsPeerBot := st.lastIsPeerBot
 	newCount := st.newCount
 	images, imgSpamNote, imgWhoNote := st.pickImages()
 	quoted := st.quoted
@@ -647,6 +665,7 @@ func (e *Engine) fire(groupID string) {
 	st.triggerOpenID, st.triggerName, st.atAll = "", "", false
 	st.faceSpam = false
 	st.atOthers = false
+	st.lastIsPeerBot = false
 	st.timer = nil
 	st.firstAt = time.Time{}
 	st.mu.Unlock()
@@ -707,6 +726,32 @@ func (e *Engine) fire(groupID string) {
 			logx.InfoCat(logx.CatDecision, "跳过：本次摇骰子没上线",
 				"group", groupLabel(g), "摇到", fmt.Sprintf("%.3f", d.Roll),
 				"在线率", fmt.Sprintf("%.2f", d.Rate), "档位", d.Label)
+			return
+		}
+	}
+
+	// 同群另一台机器人（PeerBotReplyRate）：对方刚说的那句，单独触发本机时
+	// 只按概率放行——与上面的在线率**串联相乘**，两道独立骰子。
+	//
+	// 只压「对方把话头递过来」这一种场景：
+	//   - 被 @ / 被叫名字 / 开发者 → 放行。那是有人在点它，与对方自说自话不同。
+	//   - 本批最后一条是真人 → lastIsPeerBot 已被覆盖成 false，放行。
+	//
+	// 与 2026-10-03 删掉的「最小发言间隔」的区别必须写清楚，免得后人当成它复辟：
+	// 那道闸拦的是「距上次发言太近」，会把**真人刚问的话**一起吞掉，而且那批消息
+	// 再没有任何机会进模型。这道只拦「最后说话的是对方机器人」，被拦下的那批消息
+	// 仍在 g.recent 里（OnMessage 早就登记过），下一轮照常出现在提示词的历史里——
+	// 丢的是这一轮的开口，不是内容。
+	//
+	// 它也不是「这话值不值得回」的内容判断，而是「谁在说」的来源判断，
+	// 与在线率（这会儿人在不在电脑前）同类，所以属于 fire 允许保留的限流闸。
+	if lastIsPeerBot && !atMe && !nameCalled && !fromMaster {
+		roll := rand.Float64()
+		rate := cfg.Brain.PeerBotReplyRate
+		if !peerBotAllowed(rate, roll) {
+			logx.InfoCat(logx.CatDecision, "跳过：这轮是另一台机器人刚说的话",
+				"group", groupLabel(g), "摇到", fmt.Sprintf("%.3f", roll),
+				"放行率", fmt.Sprintf("%.2f", rate))
 			return
 		}
 	}
@@ -773,6 +818,18 @@ func quoteNote(who, author, quoted string) string {
 	return fmt.Sprintf(
 		"%s引用了%s之前说的，原文是：「%s」。他可能是在回应这句话，也可能只是顺手引一下。",
 		who, a, truncate(q, 100))
+}
+
+// peerBotAllowed 同群另一台机器人触发本机时的放行判定。
+//
+// 独立成纯函数只为可测（同 ScheduleDecide 的做法）：rate 是配置值（0~1），
+// roll 是本次摇到的数（rand.Float64() ∈ [0,1)）。
+// 两个端点都必须严格成立，因为它们是配置里写下的两句话：
+// rate=1 表示「和改动前完全一样」（默认值，旧 config.json 不受影响），
+// rate=0 表示「对方再也叫不动它」（回滚/闭嘴位）。任一端偏一点，
+// 这两句话就都成了假的。
+func peerBotAllowed(rate, roll float64) bool {
+	return roll < rate
 }
 
 // allowCall 预算闸门

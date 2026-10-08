@@ -337,6 +337,21 @@ type BrainConfig struct {
 	DebounceSec       int `json:"debounce_sec"`        // 攒批基础静默窗口（秒）
 	DebounceJitterSec int `json:"debounce_jitter_sec"` // 在其上叠加的随机抖动（秒）
 
+	// PeerBotReplyRate 同群另一台机器人刚说的话单独触发本机时的放行概率（0~1）。
+	//
+	// 两台互把对方当普通群友会形成自激回路：A 开口 → 进 B 的触发链路 → B 接话
+	// → 又进 A 的链路。2026-10-08 生产实测（群「爱弥斯在网络上就是die」，6 小时）：
+	// 老爹 60 条发言里 31 条是回奶酱的，奶酱 93 条里 33 条是回老爹的，
+	// 合计每 5.6 分钟就有一条「机器人在回另一个机器人」。
+	//
+	// 这一项是**与在线率串联的第二道骰子**，不替代它：最终开口概率 = 本项 × 在线率
+	// （白天 0.25×0.9≈0.22，凌晨 0.25×0.2=0.05）。保留「偶尔搭一句」的随机感，
+	// 而不是把两台彻底隔开。
+	//
+	// 1 = 与改动前完全一致（对方和真人一样能触发）；0 = 对方再也叫不动它。
+	// 被 @ / 被叫名字 / 开发者一律放行，不走这道闸——那是有人在点它。
+	PeerBotReplyRate float64 `json:"peer_bot_reply_rate"`
+
 	// 上下文预算：给历史留多少 token。
 	// 免费模型上下文可能只有 32K，甚至更小，这里必须做硬裁剪，
 	// 否则一次请求就能把额度烧穿或直接被上游拒绝。
@@ -566,15 +581,18 @@ func Default() *Config {
 			MaxOutTokens:      400,
 			DebounceSec:       10,
 			DebounceJitterSec: 8,
-			MaxCtxTokens:      4000,
-			SummaryEvery:      24,
-			MaxImagesPerCall:  3,
-			MaxFacts:          24,
-			ImageMaxSide:      1024,
-			VideoMaxSec:       120,
-			VideoMaxMB:        50,
-			VideoFrames:       2,
-			VideoFrameSide:    768,
+			// 默认 1 = 不改变行为：没配这一项的旧 config.json 行为完全不变。
+			// 要压制两台互相搭话，在管理端或 config.json 里调小（0.25 起步）。
+			PeerBotReplyRate: 1,
+			MaxCtxTokens:     4000,
+			SummaryEvery:     24,
+			MaxImagesPerCall: 3,
+			MaxFacts:         24,
+			ImageMaxSide:     1024,
+			VideoMaxSec:      120,
+			VideoMaxMB:       50,
+			VideoFrames:      2,
+			VideoFrameSide:   768,
 			// 天气默认关闭：留空即不查（refreshEnv 只在 WeatherPlace 非空时请求）。
 			// 想开天气就填自己所在地的经纬度与地名，见 config.json.example。
 			WeatherPlace: "",

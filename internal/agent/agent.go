@@ -172,7 +172,12 @@ func (a *Agent) OnGroupMessage(ev *webhook.GroupMessage, atMe bool) {
 	//
 	// 别的机器人一律按普通群友走：登记成员（TouchMember 用 author.username
 	// 写昵称，管理端不再是「(无名)」）、记成 RoleUser 让它渲染成「· 名字：」，
-	// 并且和真人一样能触发。两台机器人互 @ 起来是允许的，不做抑制。
+	// 并且和真人一样能触发。
+	//
+	// 2026-10-08 补：触发权**降频**了，见 brain 的 PeerBotReplyRate。原来的
+	// 「不做抑制」让两台形成自激回路——老爹 6 小时 60 条发言里 31 条是回奶酱的，
+	// 群里每 5.6 分钟就有一条机器人在回另一个机器人。现在对方仍能触发，
+	// 但要过一道与在线率串联的概率闸；被 @ / 被叫名字照旧无条件放行。
 	if ev.Author.Bot && openID == cfg.QQ.SelfOpenID {
 		a.mem.Group(groupID, groupName).Append(memory.Line{
 			TS: parseTS(ev.Timestamp), Role: memory.RoleBot, Content: content, OpenID: openID,
@@ -237,7 +242,11 @@ func (a *Agent) OnGroupMessage(ev *webhook.GroupMessage, atMe bool) {
 		AtAll:              atAll,
 		AtMe:               atMe,
 		IsBot:              false,
-		TS:                 parseTS(ev.Timestamp),
+		// 走到这里还能是 bot 的，只可能是**同群的另一台机器人**：
+		// 自己发的在上面那个分支就 return 了。置这个标记不是为了拦下它，
+		// 而是让 brain 的 PeerBotReplyRate 闸能认出「这轮是对方把话头递过来」。
+		IsPeerBot: ev.Author.Bot,
+		TS:        parseTS(ev.Timestamp),
 	})
 }
 

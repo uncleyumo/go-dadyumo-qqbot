@@ -94,25 +94,31 @@ func stripLineComments(src string) string {
 	return b.String()
 }
 
-// TestGatesLeftAreOnlyTwo 剩下两道闸都必须是「与技术性限流有关」的。
+// TestGatesLeftAreAllThrottle 剩下这几道闸都必须是「与技术性限流有关」的。
 //
 // 逐个点名，是为了防止「下次要不要加个新的内容判断闸」这种想法
-// 悄悄溜进来：加之前先看看这两条，它们分别对应
-// 「你手动关的」「人在不在电脑前」「别花超钱」，
+// 悄悄溜进来：加之前先看看这几条，它们分别对应
+// 「你手动关的」「人在不在电脑前」「别花超钱」「谁在说话」，
 // 没有一条是「这话值不值得回」。
 //
 // 第三条曾经是「最小发言间隔」，2026-10-03 因为会丢消息而删掉——
 // 见 TestOnlyScheduleAndSafetyGatesRemain 里它的删除理由。
-func TestGatesLeftAreOnlyTwo(t *testing.T) {
+//
+// 第四条（2026-10-08 加的，另一台机器人刚说的话）与它只隔一层皮，所以特别说明：
+// 那条问的是「最后说话的是谁」，答完之后消息仍在上下文里，丢的是这一轮的开口；
+// 删掉的那条问的是「距上次发言多久」，会把真人刚问的话一起吞掉。
+// 加新闸之前先读这两句，别把后者当前者加回来。
+func TestGatesLeftAreAllThrottle(t *testing.T) {
 	b, err := os.ReadFile("engine.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	src := string(b)
 	for _, phrase := range []string{
-		"跳过：该群处于静默期",   // 手动急停
-		"跳过：本次摇骰子没上线", // 在线率
-		"跳过：今日预算已用尽",   // 成本硬闸
+		"跳过：该群处于静默期",       // 手动急停
+		"跳过：本次摇骰子没上线",      // 在线率
+		"跳过：今日预算已用尽",       // 成本硬闸
+		"跳过：这轮是另一台机器人刚说的话", // 同群第二台机器人的降频闸
 	} {
 		if !strings.Contains(src, phrase) {
 			t.Errorf("fire 里找不到「%s」这道闸——它不该消失，尤其不能是误删", phrase)

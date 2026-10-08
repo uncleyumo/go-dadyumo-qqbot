@@ -336,6 +336,8 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
           <small class="hint">收到消息先等这么久再决定说不说话，能把一串消息合并成一轮处理——省钱第一旋钮。建议 20~45。</small></div></div>
         <div class="row"><label>攒批抖动（秒）</label><div class="fld"><input id="bf-debj" type="number">
           <small class="hint">攒批时间上叠加的随机抖动，防机械感。建议 5~15。</small></div></div>
+        <div class="row"><label>接另一台机器人的概率</label><div class="fld"><input id="bf-peer" type="number" step="0.05" min="0" max="1">
+          <small class="hint">同群还有第二台机器人时，它刚说的话单独触发本机的放行概率，与在线率相乘（0.25×白天0.9≈0.22）。1=和真人一样能触发（旧行为），0=再也不接（被 @ 除外）。建议 0.25。</small></div></div>
         <div class="row"><label>上下文预算(token)</label><div class="fld"><input id="bf-ctx" type="number">
           <small class="hint">历史消息最多带多少 token（只管历史，人设提示词另算约 2.5K）。建议 3200；模型窗口至少 12K 才不撞。</small></div></div>
         <div class="row"><label>短期记忆条数</label><div class="fld"><input id="bf-hist" type="number">
@@ -1283,6 +1285,7 @@ function renderPersona() {
   document.getElementById('bf-out').value = b.max_out_tokens || 0;
   document.getElementById('bf-deb').value = b.debounce_sec || 0;
   document.getElementById('bf-debj').value = b.debounce_jitter_sec || 0;
+  document.getElementById('bf-peer').value = (b.peer_bot_reply_rate ?? 1);
   document.getElementById('bf-ctx').value = b.max_ctx_tokens || 0;
   const sp = CFG?.speak || {};
   document.getElementById('sf-maxseg').value = sp.max_segments || 0;
@@ -1328,6 +1331,10 @@ function collectPersona() {
   CFG.brain.max_out_tokens = +document.getElementById('bf-out').value || 0;
   CFG.brain.debounce_sec = +document.getElementById('bf-deb').value || 0;
   CFG.brain.debounce_jitter_sec = +document.getElementById('bf-debj').value || 0;
+  // 这一项 0 是有意义的取值（=彻底不接对方），所以空框不能按 0 存——
+  // 清空输入框的人想要的是「回到默认」，不是「把另一台机器人拉黑」。
+  const peerRate = document.getElementById('bf-peer').value.trim();
+  CFG.brain.peer_bot_reply_rate = peerRate === '' ? 1 : +peerRate;
   CFG.brain.max_ctx_tokens = +document.getElementById('bf-ctx').value || 0;
   CFG.speak = CFG.speak || {};
   CFG.speak.max_segments = +document.getElementById('sf-maxseg').value || 0;

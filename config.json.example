@@ -166,6 +166,8 @@
     "max_out_tokens": 400,
     "debounce_sec": 8,
     "debounce_jitter_sec": 6,
+    "_peer_bot_reply_rate": "同群还有第二台机器人时，它刚说的话单独触发本机的放行概率（与在线率相乘）。1=和真人一样能触发（默认，旧配置不受影响），0=再也不接（被 @ 除外），建议 0.25",
+    "peer_bot_reply_rate": 1,
     "max_ctx_tokens": 3200,
     "summary_every": 24,
     "max_images_per_call": 3,
