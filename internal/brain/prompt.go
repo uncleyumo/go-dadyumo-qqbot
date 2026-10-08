@@ -398,7 +398,11 @@ func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHin
 	sb.WriteString("  k 要写成「谁 + 什么属性」这种能一直用的说法，别写成一次事件的标题——" +
 		"事件标题会让你以后把它当成一个话题去提。\n")
 	sb.WriteString("  同一件事要更新，用一模一样的 k 重写，会自动覆盖，不要另起一条。\n")
-	sb.WriteString("  想删掉一条过时的记忆，把它的 k 照抄、v 写成空字符串。\n")
+	// 光给删除通道不够：写成「想删的话可以这样」只是能力说明，模型不会主动去
+	// 做。必须给一个每轮都会撞上的触发条件，否则池子里的旧流水账永远不会被清，
+	// 只能等满 24 条被 LRU 挤掉——而 LRU 挤的是「最久没写过」的，方向正好是反的。
+	sb.WriteString("  想删掉一条过时的记忆，把它的 k 照抄、v 写成空字符串；" +
+		"每次看到【你记得的关于这个群的事】里有不合上面这些规则的旧条目，就顺手删掉它。\n")
 	// 容量要报实数：MaxFacts 是可配的，写死 24 会和 config 对不上。
 	sb.WriteString(fmt.Sprintf("  这个池子只有 %d 格，写满了会自动挤掉最久没更新的一条，所以只写真正长期的。\n",
 		memory.MaxFacts))
