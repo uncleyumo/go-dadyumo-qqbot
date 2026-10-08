@@ -159,8 +159,21 @@ func (a *Agent) OnGroupMessage(ev *webhook.GroupMessage, atMe bool) {
 		}
 	}
 
-	// 机器人自己的消息不进触发逻辑，避免自我回复循环
-	if ev.Author.Bot {
+	// 只有「是机器人 且 openid 就是我自己」才算自己发的，才不进触发逻辑
+	//（避免自我回复循环）。
+	//
+	// 原来只判 ev.Author.Bot。单人时成立——平台不会把自己的消息推回给自己，
+	// 所以群里出现的 bot 消息必然是自己发的。同群跑第二个机器人（老爹/奶酱）
+	// 之后这个假设就塌了：对方的每条消息 author.bot 也是 true，于是被记成
+	// RoleBot，在 renderLines 里渲染成「· 你：」，模型把对方说的话当成自己说过
+	// 的（连带 LastText 的复读抑制也作用到别人头上）。
+	// 2026-10-08 生产实证：老爹日志里近 3 天有 80 条 username=羽沫奶酱 且
+	// bot=true 的回调。
+	//
+	// 别的机器人一律按普通群友走：登记成员（TouchMember 用 author.username
+	// 写昵称，管理端不再是「(无名)」）、记成 RoleUser 让它渲染成「· 名字：」，
+	// 并且和真人一样能触发。两台机器人互 @ 起来是允许的，不做抑制。
+	if ev.Author.Bot && openID == cfg.QQ.SelfOpenID {
 		a.mem.Group(groupID, groupName).Append(memory.Line{
 			TS: parseTS(ev.Timestamp), Role: memory.RoleBot, Content: content, OpenID: openID,
 		}, cfg.Brain.MaxHistory)

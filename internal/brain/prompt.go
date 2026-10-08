@@ -355,7 +355,10 @@ func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHin
 	sb.WriteString("即使这轮决定不说话，os 也必须写——不说话的理由只有它能说清，缺了它别人只当你卡住了。\n")
 	sb.WriteString("然后必须输出一个 JSON：\n")
 	sb.WriteString("<json>\n")
-	sb.WriteString("{\"act\":\"say\",\"to\":\"要回谁的名字，可空\",\"blocks\":[{\"t\":\"text\",\"c\":\"要发的话\"}],\"tone\":\"roast\",\"mood\":\"你现在的情绪\",\"mem\":[{\"k\":\"值得记住的事\",\"v\":\"具体内容\"}]}")
+	// 示例里不能出现可以照抄的具体串（见 prompt.go:210 的「绷」、prompt.go:349
+	// 的情绪示例）。mem 的 key 形态在下面字段说明里用抽象说法教，示例只给形状——
+	// 摆一句真事进去，模型就会把那一句原样写进记忆池。
+	sb.WriteString("{\"act\":\"say\",\"to\":\"要回谁的名字，可空\",\"blocks\":[{\"t\":\"text\",\"c\":\"要发的话\"}],\"tone\":\"roast\",\"mood\":\"你现在的情绪\",\"mem\":[{\"k\":\"谁+什么属性\",\"v\":\"具体内容\"}]}")
 	sb.WriteString("\n</json>\n\n")
 	sb.WriteString("字段说明：\n")
 	sb.WriteString("- act：say=说话，quiet=这次闭嘴\n")
@@ -372,7 +375,33 @@ func systemPrompt(cfg config.Config, g *memory.Group, mood MoodSignal, masterHin
 	sb.WriteString("  at 块放在它要接的那句 text 前面，它会变成那句的艾特前缀——别单独发一个只有 at 的块。\n")
 	sb.WriteString("  绝大多数时候不用 at（见上面【关于 @ 别人】），名字对不上就当没写，别猜。\n")
 	sb.WriteString("- tone：roast=嘴臭，warm=损完补一句实在话，empathy=认真共情\n")
-	sb.WriteString("- mem：这轮值得记住的东西，没有就给空数组\n")
+	// mem 的准入判据。
+	//
+	// 原来只有一句「这轮值得记住的东西」，没有判据，模型只能按「这轮发生了什么
+	// 有意思的事」来填。结果是长期记忆池里全是刚聊过的流水账——而那段对话本来
+	// 就还在滑窗里，等于同一件事注入两遍，模型读成「这事被强调过」，于是揪着
+	// 一个话题反复说。第①条（原文还在不在窗口里）是唯一能当场自检的判据，
+	// 所以放最前面。
+	//
+	// 正文里不写任何具体人名或具体事件当例子：固定段每轮都刷，摆什么模型就抄
+	// 什么。生产上被抄进记忆池的正是「羽沫大叔半夜连@我三次这件事」这类标题。
+	sb.WriteString("- mem：写你对这个群、这些人的长期认知，没有就给空数组。\n")
+	sb.WriteString("  该写的：身份、称呼、忌讳、群规、固定的人际关系、某个说法在这个群里的固定含义；" +
+		"以及跨天还没结束、之后还会被提起的事。\n")
+	sb.WriteString("  四条不许写：\n")
+	sb.WriteString("  ① 这件事的原文现在还在【群里最近在聊】里——那是刚才的事，我看得见，你再写一遍我只会以为你在强调它；\n")
+	sb.WriteString("  ② 明天就没人提的：今晚、此刻的心情、一次性的吐槽、临时的进度；\n")
+	sb.WriteString("  ③ 只有眼下这几句才看得懂的话（半句、没头没尾的代号）；\n")
+	sb.WriteString("  ④ 你自己刚说过的回复。\n")
+	// key 写成事件标题，等于给模型一份话题索引，它以后会顺着索引主动找话说。
+	// 所以只描述形态，不给例句。
+	sb.WriteString("  k 要写成「谁 + 什么属性」这种能一直用的说法，别写成一次事件的标题——" +
+		"事件标题会让你以后把它当成一个话题去提。\n")
+	sb.WriteString("  同一件事要更新，用一模一样的 k 重写，会自动覆盖，不要另起一条。\n")
+	sb.WriteString("  想删掉一条过时的记忆，把它的 k 照抄、v 写成空字符串。\n")
+	// 容量要报实数：MaxFacts 是可配的，写死 24 会和 config 对不上。
+	sb.WriteString(fmt.Sprintf("  这个池子只有 %d 格，写满了会自动挤掉最久没更新的一条，所以只写真正长期的。\n",
+		memory.MaxFacts))
 	sb.WriteString("- collect（可选）：这轮给你的图里，有值得收着以后自己发的，就写 [{\"i\":图片序号,\"d\":\"一句话描述\"}]。没有就别写这个字段。\n")
 	sb.WriteString("  i 是这轮给你看的图片序号，从 1 开始。描述是你以后挑图时唯一的线索，写具体点（「无语到翻白眼」而不是「猫」）。\n")
 	sb.WriteString("  只收有梗的：经典反应图、梗图。截图、自拍、风景照没有梗，收了纯占位置。\n")
@@ -451,7 +480,11 @@ func userPrompt(cfg config.Config, g *memory.Group, lines []memory.Line, trigger
 			recent + "\n\n")
 	}
 	if facts := g.Facts(); facts != "" {
-		sb.WriteString("【你记得的关于这个群的事】\n" + facts + "\n\n")
+		// 必须声明「这是背景不是话题」。否则这节等于一份话题清单，模型会挨个
+		// 拿去当话头——这正是它揪着旧事不放的另一半原因。
+		sb.WriteString("【你记得的关于这个群的事】\n" +
+			"这些是你早就知道的背景，不是这轮的话题：不要主动提、不要复述、不要追问，除非这轮正好撞上它。\n" +
+			facts + "\n\n")
 	}
 	if people := renderMemberNotes(g); people != "" {
 		sb.WriteString("【你记得的关于这些人的事】\n" + people + "\n\n")

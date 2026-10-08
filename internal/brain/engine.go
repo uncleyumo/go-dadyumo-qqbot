@@ -1016,6 +1016,15 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 	// 的现场，与上面那条提权日志同理——管理端默认视图筛的就是 decision，
 	// 且它是唯一被强制持久化进统计库的分类，放对地方重启后也查得到。
 	for _, m := range dec.Memo {
+		// v 留空 = 模型主动清理一条过时的记忆（约定见 prompt.go 的 mem 字段说明）。
+		// 没有这个分支的话，空 v 会被 SetFact 当非法输入静默丢掉（short.go:603），
+		// 「它想删但删不掉」在生产上完全不可观测。
+		if k := strings.TrimSpace(m.K); k != "" && strings.TrimSpace(m.V) == "" {
+			g.DelFact(k)
+			logx.InfoCat(logx.CatDecision, "删除长期记忆（模型主动清理）",
+				"group", groupLabel(g), "key", truncate(k, 30))
+			continue
+		}
 		if evicted := g.SetFact(m.K, m.V); evicted != "" {
 			logx.InfoCat(logx.CatDecision, "写入长期记忆，挤掉了最旧一条",
 				"group", groupLabel(g), "key", truncate(m.K, 30), "淘汰", truncate(evicted, 30))
