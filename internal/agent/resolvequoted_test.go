@@ -125,6 +125,32 @@ func TestResolveQuotedPicsWithoutText(t *testing.T) {
 	}
 }
 
+// 索引命中了、但索引那条没存到图，而平台这次把图给了：
+// 图不能丢，归属还得改成索引里的原作者。
+//
+// 平台给的附件是**没有作者**的，直接留用会在下游显示成「有人发的」——
+// 明明已经查到是谁了，退回去说「有人」比不知道还糟。
+func TestResolveQuotedKeepsPlatformPicsOnIndexHit(t *testing.T) {
+	idx := qqapi.NewQuoteIndex(10)
+	idx.Add(testGroup, "REFIDX_txt", qqapi.QuoteSrc{OpenID: "o-q", Name: "青鸟主簿", Text: "看这个"})
+
+	text, pics, name, _ := resolveQuoted(idx, testGroup, "REFIDX_txt", "",
+		[]brain.MediaRef{{URL: "https://example.com/from-platform.gif"}}, "", "")
+
+	if text != "看这个" {
+		t.Errorf("原文应来自索引，got %q", text)
+	}
+	if len(pics) != 1 || pics[0].URL != "https://example.com/from-platform.gif" {
+		t.Fatalf("索引没图时不该把平台给的图丢掉，got %#v", pics)
+	}
+	if pics[0].Name != "青鸟主簿" || pics[0].OpenID != "o-q" {
+		t.Errorf("归属要改成索引里的原作者，got %q / %q", pics[0].Name, pics[0].OpenID)
+	}
+	if name != "青鸟主簿" {
+		t.Errorf("作者应带出，got %q", name)
+	}
+}
+
 // 不是引用（没有 ref_msg_idx）时，一个字都不许造。
 //
 // 这条防的是「占位写漏了条件」：普通消息一旦被塞进 quotedUnknown，

@@ -701,11 +701,11 @@ func appendPart(sb *strings.Builder, s string) {
 
 // resolveQuoted 决定「被引用的那条」最终长什么样。
 //
-// 平台给的引用回调里**没有作者、也没有图片**（2026-10-08 实测：81 条含引用的
-// 回调带 attachments 的 0 条，20 条带 msg_elements 的里带 author 的 0 条），
-// 所以先拿本机索引反查：那条只要本机见过——收到过，或者就是自己发出去的——
-// 原作者、原文、图片就全都能补回来，包括图片的 CDN 地址
-// （能直接喂给视觉模型，改动之前这张图根本进不来）。
+// 平台给的引用回调里**永远没有作者**，图片则时有时无
+// （2026-10-08 实测一天 91 条含引用的回调：带被引用消息 author 的 0 条，
+// 带被引用图片附件的只有 3 条，而且那 3 条同样没有作者）。所以先拿本机索引反查：
+// 那条只要本机见过——收到过，或者就是自己发出去的——原作者、原文、图片
+// 就全都能补回来，图片还带得回 CDN 地址直接喂给视觉模型。
 //
 // 反查不到时**不能就这么算了**：至少要把「这是一条引用别人的消息」报出去。
 // 以前这里什么都不报，模型只看到一句「肉不肉麻啊……」，于是把被引用的图
@@ -727,6 +727,14 @@ func resolveQuoted(idx *qqapi.QuoteIndex, groupID, ref, platformText string,
 		pics = make([]brain.MediaRef, 0, len(src.Images))
 		for _, u := range src.Images {
 			pics = append(pics, brain.MediaRef{OpenID: src.OpenID, Name: src.Name, URL: u})
+		}
+		if len(pics) == 0 {
+			// 索引那条没存到图（收的时候附件没解析出来之类），而平台这次给了。
+			// 图不能丢，但归属要改成索引里的原作者——平台给的那份没有作者，
+			// 留着会让下游显示成「有人」，那比不知道还糟。
+			for _, p := range platformPics {
+				pics = append(pics, brain.MediaRef{OpenID: src.OpenID, Name: src.Name, URL: p.URL})
+			}
 		}
 		switch {
 		case src.Text != "":
