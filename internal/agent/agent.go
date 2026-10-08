@@ -224,6 +224,18 @@ func (a *Agent) OnGroupMessage(ev *webhook.GroupMessage, atMe bool) {
 		a.qq.Quotes(), groupID, refMsgIdxOf(ev.MessageScene),
 		quotedText, quotedPic, quotedName, quotedOpenID)
 
+	// 上面那行「群消息」日志里的「引用」字段是在反查**之前**打的，只反映平台给了什么。
+	// 反查命中没有、补回了谁的图和话，只能靠这一条看——不记的话这个功能
+	// 在日志里完全隐形，出了错只能靠模型说了什么去猜。
+	if refMsgIdxOf(ev.MessageScene) != "" {
+		who := quotedName
+		if who == "" {
+			who = "（认不出，平台没给作者）"
+		}
+		logx.InfoCat(logx.CatChat, "引用解析", "group", groupName, "引用者", name,
+			"被引用者", who, "内容", truncate(quotedText, 60), "图", len(quotedPic))
+	}
+
 	// 视频/语音/引用都要记住是谁发的：模型要能说「这是谁发的」，
 	// 发送层也要能把这轮回复挂回这个人。
 	videos := make([]brain.MediaRef, 0, len(ev.Attachments))
