@@ -30,6 +30,7 @@ func TestFallbackLinesFormIsWired(t *testing.T) {
 		t.Error("collectPersona 没有把 pf-fallback 写回 CFG（保存后不生效）")
 	}
 }
+
 // busy_lines 与 fallback_lines 一样是「填框 → 读回 → 存回」三处字符串，
 // 少一处就静默失效。跟着上一个测试一起钉住。
 func TestBusyLinesFormIsWired(t *testing.T) {
@@ -67,6 +68,27 @@ func TestReplyRulesFormIsWired(t *testing.T) {
 	}
 	if !strings.Contains(html, `CFG.persona.reply_rules = lines(document.getElementById('pf-reply').value)`) {
 		t.Error("collectPersona 没有把 pf-reply 写回 CFG（保存后不生效）")
+	}
+}
+
+// voice 跟上面几项同构：输入框、填值、收值三处字符串少一处就静默失效。
+// 这一项失效的后果更隐蔽——保存一次人设，固定段的口吻选择就被抹成空串，
+// 机器人退回默认口吻，而页面上看不出任何报错。
+func TestVoiceFormIsWired(t *testing.T) {
+	b, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("读取页面失败: %v", err)
+	}
+	html := string(b)
+
+	if !strings.Contains(html, `id="pf-voice"`) {
+		t.Error("页面缺少口吻输入框 pf-voice")
+	}
+	if !strings.Contains(html, `getElementById('pf-voice').value = p.voice || ''`) {
+		t.Error("renderPersona 没有把 voice 填进 pf-voice（打开页面会是空框）")
+	}
+	if !strings.Contains(html, `CFG.persona.voice = document.getElementById('pf-voice').value.trim()`) {
+		t.Error("collectPersona 没有把 pf-voice 写回 CFG（保存后不生效）")
 	}
 }
 

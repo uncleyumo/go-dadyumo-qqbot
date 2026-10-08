@@ -101,3 +101,50 @@ func TestReplyRulesStayInFixedSegment(t *testing.T) {
 		t.Error("对照组：环境时间应出现在动态段里")
 	}
 }
+
+// voice 决定固定段里那几句口吻，而且一个位置上只能有一句。
+//
+// 空串必须逐字等于改动前的老爹版：两台机器人共用这一段代码，
+// 默认值变了等于老爹的人设被悄悄换掉。
+// 「软」必须把老爹那几句换掉而不是叠加上去——两句并存时模型每轮
+// 随机挑一句执行，这是本文件顶部注释里记过的老毛病。
+func TestVoiceSelectsTone(t *testing.T) {
+	e := newTestEngine(t, &recordingSender{}, nil, false)
+	g := e.mem.Group("g1", "群A")
+
+	def := systemPrompt(config.Config{}, g, MoodSignal{}, "", "", "")
+	for _, keep := range []string{
+		"别人服你，是因为你话少、说得准、被惹了不急",
+		"大部分时候你还是不说话",
+		"回「咋」「在」「嗯？」这种一两个字就够",
+		"<os>懒得理他</os>",
+	} {
+		if !strings.Contains(def, keep) {
+			t.Errorf("voice 为空时缺了老爹版的 %q：默认口吻被改了", keep)
+		}
+	}
+	for _, gone := range []string{"别人乐意理你", "想逗他一下", "先哼一声"} {
+		if strings.Contains(def, gone) {
+			t.Errorf("voice 为空时不该出现奶酱版的 %q", gone)
+		}
+	}
+
+	soft := config.Config{}
+	soft.Persona.Voice = "软"
+	got := systemPrompt(soft, g, MoodSignal{}, "", "", "")
+	for _, want := range []string{
+		"别人乐意理你，是因为你在的时候这群更热闹",
+		"有反应就开口，但别把每条缝都填上",
+		"一个语气词、先哼一声、或者一句反问就够",
+		"<os>想逗他一下</os>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("voice=软 时缺了 %q", want)
+		}
+	}
+	for _, gone := range []string{"别人服你", "懒得理他", "大部分时候你还是不说话"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("voice=软 时老爹版的 %q 还在：两句并存，模型会随机挑一句", gone)
+		}
+	}
+}

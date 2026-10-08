@@ -43,9 +43,9 @@ type Config struct {
 	Speak    SpeakConfig    `json:"speak"`
 	Groups   []GroupConfig  `json:"groups"`
 	Storage  StorageConfig  `json:"storage"`
-	Schedule ScheduleConfig `json:"schedule"` // 在线时段调度（省钱 + 拟真作息）
-	ASR      ASRConfig      `json:"asr"`      // 语音转文字（视频音轨 + 群语音兜底）
-	Compact  CompactConfig  `json:"compact"`  // 超长转写压缩（纯文本小模型，不进中央调度器）
+	Schedule ScheduleConfig `json:"schedule"`  // 在线时段调度（省钱 + 拟真作息）
+	ASR      ASRConfig      `json:"asr"`       // 语音转文字（视频音轨 + 群语音兜底）
+	Compact  CompactConfig  `json:"compact"`   // 超长转写压缩（纯文本小模型，不进中央调度器）
 	MemePool MemePoolConfig `json:"meme_pool"` // 表情包池（MinIO 存储 + 工具调用）
 }
 
@@ -54,7 +54,7 @@ type Config struct {
 // 默认关闭。它依赖 MinIO 与 QQ 富媒体上传两条外部链路，
 // 任何一条没通都不该让机器人带着这个功能上线。
 type MemePoolConfig struct {
-	Enabled bool   `json:"enabled"`
+	Enabled bool        `json:"enabled"`
 	MinIO   MinIOConfig `json:"minio"`
 	// MaxPool 池子上限。每次工具调用会把整个池子返回给模型、直接烧 token，
 	// 所以这个数不是「能存多少」而是「模型一次能扫完并选准」的上限。
@@ -263,9 +263,19 @@ type Model struct {
 
 // PersonaConfig 人设
 type PersonaConfig struct {
-	Name         string   `json:"name"`
-	Background   string   `json:"background"`
-	Style        string   `json:"style"`
+	Name       string `json:"name"`
+	Background string `json:"background"`
+	Style      string `json:"style"`
+
+	// Voice 选固定段里那几句「口吻」用哪一版。
+	//
+	// 空串是默认，也就是老爹那版（话少、说得准、被惹了不急）。
+	// 「软」是奶酱那版：同样的位置换成她的准头和她的节奏。
+	//
+	// 为什么不把这些句子直接写进人设 JSON：它们跟【价值观】【像人不像人】
+	// 是同一节的收尾，拆出去模型读到的是两处互相打架的说法，
+	// 而固定段更长、更具体，每次都赢。放在这里，一句位置上只有一种说法。
+	Voice        string   `json:"voice"`
 	RoastRules   []string `json:"roast_rules"`
 	RedLines     []string `json:"red_lines"`
 	Catchphrases []string `json:"catchphrases"`
@@ -311,8 +321,8 @@ type PersonaConfig struct {
 
 // BrainConfig 决策引擎
 type BrainConfig struct {
-	DailyBudget  int     `json:"daily_budget"`  // 每日 LLM 调用预算
-	MaxHistory   int     `json:"max_history"`   // 短期记忆条数
+	DailyBudget  int     `json:"daily_budget"` // 每日 LLM 调用预算
+	MaxHistory   int     `json:"max_history"`  // 短期记忆条数
 	Temperature  float64 `json:"temperature"`
 	MaxOutTokens int     `json:"max_out_tokens"`
 
@@ -550,27 +560,27 @@ func Default() *Config {
 			},
 		},
 		Brain: BrainConfig{
-			DailyBudget:         300,
-			MaxHistory:          30,
-			Temperature:         0.95,
-			MaxOutTokens:        400,
-			DebounceSec:         10,
-			DebounceJitterSec:   8,
-			MaxCtxTokens:        4000,
-			SummaryEvery:        24,
-			MaxImagesPerCall:    3,
-			MaxFacts:            24,
-			ImageMaxSide:        1024,
-			VideoMaxSec:         120,
-			VideoMaxMB:          50,
-			VideoFrames:         2,
-VideoFrameSide:      768,
-		// 天气默认关闭：留空即不查（refreshEnv 只在 WeatherPlace 非空时请求）。
-		// 想开天气就填自己所在地的经纬度与地名，见 config.json.example。
-		WeatherPlace: "",
-	},
-	Persona: PersonaConfig{MaxChars: 120},
-	Master:  MasterConfig{BindEnabled: true},
+			DailyBudget:       300,
+			MaxHistory:        30,
+			Temperature:       0.95,
+			MaxOutTokens:      400,
+			DebounceSec:       10,
+			DebounceJitterSec: 8,
+			MaxCtxTokens:      4000,
+			SummaryEvery:      24,
+			MaxImagesPerCall:  3,
+			MaxFacts:          24,
+			ImageMaxSide:      1024,
+			VideoMaxSec:       120,
+			VideoMaxMB:        50,
+			VideoFrames:       2,
+			VideoFrameSide:    768,
+			// 天气默认关闭：留空即不查（refreshEnv 只在 WeatherPlace 非空时请求）。
+			// 想开天气就填自己所在地的经纬度与地名，见 config.json.example。
+			WeatherPlace: "",
+		},
+		Persona: PersonaConfig{MaxChars: 120},
+		Master:  MasterConfig{BindEnabled: true},
 		Speak: SpeakConfig{
 			MaxSegments: 5,
 			// 间隔按真人速度给：真人从打完上一句到发出下一句，
@@ -604,12 +614,12 @@ VideoFrameSide:      768,
 		MemePool: MemePoolConfig{
 			// 默认关闭：依赖 MinIO 与 QQ 富媒体上传两条外部链路，
 			// 哪条没通都不该带着它上线。
-			Enabled:            false,
-			MaxPool:            20,
-			MaxResidencyDays:   30,
-			OptIntervalHours:   6,
-			MaxToolRounds:      3,
-			MaxImagesPerReply:  1,
+			Enabled:           false,
+			MaxPool:           20,
+			MaxResidencyDays:  30,
+			OptIntervalHours:  6,
+			MaxToolRounds:     3,
+			MaxImagesPerReply: 1,
 			MinIO: MinIOConfig{
 				Region:    "us-east-1",
 				StateFile: "memes.json",

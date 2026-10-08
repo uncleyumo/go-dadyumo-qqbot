@@ -284,6 +284,9 @@ button.danger{background:transparent;border:1px solid #4a2730;color:var(--bad)}
       <h2>它是谁 <span class="hint">这部分的每一行都会逐字进 system prompt，写多少烧多少 token</span></h2>
       <div class="row"><label>名字</label><div class="fld"><input id="pf-name">
         <small class="hint">它在群里的名字，也是群友 @ 它、叫它时触发回应的关键词。</small></div></div>
+      <div class="row"><label>口吻</label><div class="fld"><input id="pf-voice">
+        <small class="hint">留空走默认（话少、说得准、被惹了不急）。填「软」换成爱凑热闹那一版的口吻。
+        它改的是提示词固定段里的几句话，不是这里的背景和风格——两处别写成互相打架的说法。</small></div></div>
       <div class="row"><label>背景</label><div class="fld"><textarea id="pf-bg" class="ta-lg"></textarea>
         <small class="hint">它是什么人、什么来头。建议 ≤200 字，写太长每轮对话都在烧钱。</small></div></div>
       <div class="row"><label>说话风格</label><div class="fld"><textarea id="pf-style" class="ta-lg"></textarea>
@@ -1261,6 +1264,7 @@ const lines = v => (v || '').split('\n').map(s => s.trim()).filter(Boolean);
 function renderPersona() {
   const p = CFG?.persona || {}, b = CFG?.brain || {};
   document.getElementById('pf-name').value = p.name || '';
+  document.getElementById('pf-voice').value = p.voice || '';
   document.getElementById('pf-bg').value = p.background || '';
   document.getElementById('pf-style').value = p.style || '';
   document.getElementById('pf-catch').value = (p.catchphrases || []).join('\n');
@@ -1305,6 +1309,7 @@ function renderQQ() {
 }
 function collectPersona() {
   CFG.persona.name = document.getElementById('pf-name').value;
+  CFG.persona.voice = document.getElementById('pf-voice').value.trim();
   CFG.persona.background = document.getElementById('pf-bg').value;
   CFG.persona.style = document.getElementById('pf-style').value;
   CFG.persona.catchphrases = lines(document.getElementById('pf-catch').value);

@@ -49,7 +49,12 @@ func TestSystemPromptForbidsSayingCannotSee(t *testing.T) {
 	}
 
 	// 只禁不给路会漏：必须给具体替代行为，这是替代清单存在的唯一理由
-	for _, alt := range []string{"不是你的吗", "quiet"} {
+	// 只禁不给路会漏：必须给替代行为。
+	//
+	// 原来钉的是「不是你的吗」——那是给模型的现成的串，而它是老爹的口吻，
+	// 写在两台机器人共用的固定段里，奶酱照抄就成了「我是老东西」。
+	// 现成的串拆掉了，改钉「顺着上下文接话」这个行为本身还在。
+	for _, alt := range []string{"顺着聊天记录里的上下文接话", "quiet"} {
 		if !strings.Contains(s, alt) {
 			t.Errorf("必须给出具体的替代行为 %q，只禁不给路模型会换个方式犯", alt)
 		}
@@ -122,7 +127,7 @@ func TestMentionMarkerIsExplainedInPrompt(t *testing.T) {
 
 	s := systemPrompt(cfg, g, MoodSignal{}, "", "现在时间：2026年10月02日 01:30:00（周四）", "")
 	if !strings.Contains(s, "〔@某人〕") {
-		t.Error("固定段里没有 〔@某人〕 的图例：模型不知道这个标记是什么意思，"+
+		t.Error("固定段里没有 〔@某人〕 的图例：模型不知道这个标记是什么意思，" +
 			"就会把那个群名片当成聊天正文读")
 	}
 	// 图例必须说清「括号里是名字，不是他打的字」——这正是老 bug 的误解点
