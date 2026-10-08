@@ -2,8 +2,12 @@
 package qqapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -25,6 +29,7 @@ type Client struct {
 	store   *config.Store
 	api     openapi.OpenAPI
 	anchors *AnchorPool
+	quotes  *QuoteIndex
 	limiter *tokenBucket
 
 	// ts 持有 token source 是为了发富媒体：botgo 的 openapi 接口只封装了
@@ -68,6 +73,7 @@ func New(ctx context.Context, store *config.Store) (*Client, error) {
 		store:   store,
 		api:     api,
 		anchors: NewAnchorPool(20),
+		quotes:  NewQuoteIndex(0),
 		limiter: newTokenBucket(20, time.Minute), // 保守：全局 20 条/分钟
 		ts:      ts,
 		appID:   cfg.QQ.AppID,
@@ -115,6 +121,10 @@ func refreshLoop(ctx context.Context, ts oauth2.TokenSource) {
 
 // Anchors 暴露锚点池，供上层在收到消息时登记
 func (c *Client) Anchors() *AnchorPool { return c.anchors }
+
+// Quotes 暴露引用索引，供上层在收到消息时登记、在遇到引用时反查。
+// 自己发出去的消息由本包在发送成功后自动登记，上层不用管。
+func (c *Client) Quotes() *QuoteIndex { return c.quotes }
 
 // SendGroup 向群发送文本，只走被动回复（挂 msg_id）。
 func (c *Client) SendGroup(ctx context.Context, groupOpenID, content string) error {
@@ -168,10 +178,22 @@ func (c *Client) sendGroup(ctx context.Context, groupOpenID, content, replyToOpe
 				c.anchors.Release(groupOpenID, msgID)
 				return errors.New("发送限流：本分钟配额已用尽")
 			}
-			err := c.post(ctx, groupOpenID, content, msgID, refIdx, seq)
+			sentRefIdx, err := c.post(ctx, groupOpenID, content, msgID, refIdx, seq)
 			if err == nil {
+				// 把刚发出去的这条记进引用索引：平台不会把自己的消息推回给自己，
+				// 不记的话「有人引用了老爹说过的话」永远反查不到（2026-10-08 实测
+				// 这一路能多覆盖当天引用的 14/81）。
+				//
+				// 正文去掉 @ 标签再记：模型看到 `<qqbot-at-user id="…"/>`
+				// 认不出是谁，还可能学着写那串乱码（agent 侧对收到的消息
+				// 也做同样的清洗，两边得一致）。
+				c.quotes.Add(groupOpenID, sentRefIdx, QuoteSrc{
+					OpenID: cfg.QQ.SelfOpenID,
+					Name:   cfg.Persona.Name,
+					Text:   strings.TrimSpace(atTagInText.ReplaceAllString(content, "")),
+				})
 				logx.Debug("群消息已发送（被动）", "group", groupOpenID, "seq", seq, "挂给", replyToOpenID,
-					"引用", refIdx != "")
+					"引用", refIdx != "", "本条引用id", sentRefIdx != "")
 				return nil
 			}
 			// 只还额度，不回滚 seq——见 anchor.go 里 seq 只增不减的说明
@@ -212,10 +234,71 @@ func (c *Client) sendGroup(ctx context.Context, groupOpenID, content, replyToOpe
 //
 // refIdx 为空时整个 MessageReference 字段为 nil，序列化后不出现——
 // 平台不一定每条消息都给 refIdx，不该因为缺它就发不出去。
-func (c *Client) post(ctx context.Context, groupOpenID, content, msgID, refIdx string, seq uint32) error {
+//
+// 返回值是本条消息**自己**的引用 id（平台在响应的 ext_info.ref_idx 里给）。
+// 它唯一的用途是进 QuoteIndex：别人以后引用这条时，回调里只带这个 id。
+func (c *Client) post(ctx context.Context, groupOpenID, content, msgID, refIdx string, seq uint32) (string, error) {
 	msg := buildGroupMessage(content, msgID, refIdx, seq)
-	_, err := c.api.PostGroupMessage(ctx, groupOpenID, msg)
-	return err
+	return c.postGroupMessage(ctx, groupOpenID, msg)
+}
+
+// postGroupMessage 自己发 POST /v2/groups/{id}/messages，只为拿到响应里的
+// ext_info.ref_idx。
+//
+// 为什么不用 botgo 的 api.PostGroupMessage：它的 dto.Message 里**没有**
+// ext_info 字段（dto.MessageScene 也只有 source/callback_data，没有 ext），
+// 响应体整个被丢掉，而我们正需要这一个字段。botgo 没有留任何拿原始响应体的口子
+// （options.Option 只能改 URL 和 hidetip），所以只能自己发这一条。
+//
+// 请求形态逐项对着 botgo 的 setupClient 抄，**少一样都可能被平台拒**：
+//
+//   - Authorization 用 QQBot 方案（botgo 是 SetAuthScheme(tk.TokenType)），
+//     不是 Bearer；媒体上传那边写死 Bearer 会被 401 code=11241 顶回来。
+//   - X-Union-Appid 填 appID（botgo 无条件带这个头）。
+//   - body 就是 dto.MessageToCreate 的 JSON，和 botgo 序列化出来的一模一样。
+//
+// 出错时的返回与 botgo 一致（错误信息里带平台 code），调用方的
+// 「失败就 Release 锚点」逻辑不用改。
+func (c *Client) postGroupMessage(ctx context.Context, groupOpenID string, msg *dto.MessageToCreate) (string, error) {
+	buf, err := json.Marshal(msg)
+	if err != nil {
+		return "", err
+	}
+	tk, err := c.ts.Token()
+	if err != nil {
+		return "", fmt.Errorf("取 access token 失败: %w", err)
+	}
+	url := fmt.Sprintf("%s/v2/groups/%s/messages", c.apiBase(), groupOpenID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader(tk))
+	req.Header.Set("X-Union-Appid", c.appID)
+
+	resp, err := c.httpc.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("发送群消息失败: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+
+	var out struct {
+		ExtInfo struct {
+			RefIdx string `json:"ref_idx"`
+		} `json:"ext_info"`
+		Message string `json:"message"`
+		ErrCode int    `json:"err_code"`
+	}
+	// 解析失败不致命：2xx 时只是拿不到 ref_idx（退化成改动前的行为），
+	// 非 2xx 时下面那条错误信息里的 body 摘要仍然有用。
+	_ = json.Unmarshal(raw, &out)
+	if resp.StatusCode/100 != 2 {
+		return "", fmt.Errorf("发送群消息 HTTP %d code=%d: %s", resp.StatusCode, out.ErrCode,
+			strings.TrimSpace(truncateStr(string(raw), 200)))
+	}
+	return out.ExtInfo.RefIdx, nil
 }
 
 // buildGroupMessage 拼一条被动回复。

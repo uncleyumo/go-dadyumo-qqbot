@@ -214,6 +214,16 @@ func (a *Agent) OnGroupMessage(ev *webhook.GroupMessage, atMe bool) {
 
 	imgs, quotedText, quotedPic, quotedOpenID, quotedName := parsePics(ev)
 
+	// 每条收到的消息都按它自己的引用 id 记一笔：别人以后引用它时，
+	// 回调里只带这个 id，作者和图片都得从这里反查。详见 qqapi.QuoteIndex。
+	a.qq.Quotes().Add(groupID, refIdxOf(ev.MessageScene), qqapi.QuoteSrc{
+		OpenID: openID, Name: name, Text: content, Images: imgs,
+	})
+
+	quotedText, quotedPic, quotedName, quotedOpenID = resolveQuoted(
+		a.qq.Quotes(), groupID, refMsgIdxOf(ev.MessageScene),
+		quotedText, quotedPic, quotedName, quotedOpenID)
+
 	// 视频/语音/引用都要记住是谁发的：模型要能说「这是谁发的」，
 	// 发送层也要能把这轮回复挂回这个人。
 	videos := make([]brain.MediaRef, 0, len(ev.Attachments))
@@ -419,6 +429,18 @@ const maxQuotedChars = 120
 // 说的」，于是回错了人——这在群友甩一段聊天记录出来让你看的时候最容易发生。
 //
 // 拿不到就返回空——引用只是辅助上下文，解析失败不值得让消息本身处理失败。
+// 被引用那条的正文拿不到时用的占位。
+//
+// 三者都是「知道有这么个引用、但内容不完整」，区别只在缺哪一半。
+// quotedUnknown 尤其要注意措辞：**不能写成「平台没给我」**——
+// 那句话会教模型自曝（brain 的 quoteNote 里有详述）。
+// 这里只陈述「被引用的是别人发的一条消息」，让它别把引用内容当成引用者自己发的。
+const (
+	quotedPicOnly = "（一张图）"
+	quotedNoText  = "（一条没有文字的消息）"
+	quotedUnknown = "（别人发的消息，内容未知）"
+)
+
 func extractQuoted(els []*webhook.MsgElement) (text string, imgs []string, authorOpenID, authorName string) {
 	var texts []string
 	var authors []string
@@ -488,9 +510,9 @@ func extractQuoted(els []*webhook.MsgElement) (text string, imgs []string, autho
 	if len(els) > 0 && text == "" {
 		switch {
 		case len(imgs) > 0:
-			text = "（一张图）"
+			text = quotedPicOnly
 		case authorOpenID != "":
-			text = "（一条没有文字的消息）"
+			text = quotedNoText
 		case rawNonEmpty:
 			// 原始正文非空、cleanTags 之后空了：正文里装的是平台标记，
 			// 而标记没匹配上 faceTagRe（平台改了格式）。
@@ -665,7 +687,59 @@ func appendPart(sb *strings.Builder, s string) {
 	sb.WriteString(s)
 }
 
+// resolveQuoted 决定「被引用的那条」最终长什么样。
+//
+// 平台给的引用回调里**没有作者、也没有图片**（2026-10-08 实测：81 条含引用的
+// 回调带 attachments 的 0 条，20 条带 msg_elements 的里带 author 的 0 条），
+// 所以先拿本机索引反查：那条只要本机见过——收到过，或者就是自己发出去的——
+// 原作者、原文、图片就全都能补回来，包括图片的 CDN 地址
+// （能直接喂给视觉模型，改动之前这张图根本进不来）。
+//
+// 反查不到时**不能就这么算了**：至少要把「这是一条引用别人的消息」报出去。
+// 以前这里什么都不报，模型只看到一句「肉不肉麻啊……」，于是把被引用的图
+// 当成引用者自己发的。
+//
+// 独立成一个函数而不是写在 OnGroupMessage 里，是为了能直接测这段判断：
+// 它的几种结局在 OnGroupMessage 里构造不出来（那需要一个真的 qqapi.Client）。
+// parsePics 当年因为拆开测而假绿过一次，所以这里连调用点一起测。
+func resolveQuoted(idx *qqapi.QuoteIndex, groupID, ref, platformText string,
+	platformPics []brain.MediaRef, authorName, authorOpenID string) (
+	text string, pics []brain.MediaRef, name, openID string) {
+
+	text, pics, name, openID = platformText, platformPics, authorName, authorOpenID
+	if ref == "" {
+		return // 这条消息没有引用，一个字都不许造
+	}
+	if src, ok := idx.Lookup(groupID, ref); ok {
+		name, openID = src.Name, src.OpenID
+		pics = make([]brain.MediaRef, 0, len(src.Images))
+		for _, u := range src.Images {
+			pics = append(pics, brain.MediaRef{OpenID: src.OpenID, Name: src.Name, URL: u})
+		}
+		switch {
+		case src.Text != "":
+			text = src.Text
+		case len(src.Images) > 0:
+			text = quotedPicOnly
+		default:
+			text = quotedNoText
+		}
+	}
+	if text == "" {
+		// 走到这里说明「确实是引用，但正文一个字都没有」。图还在就只说图，
+		// 图也没有才落到那个最含糊的占位——但绝不能留空：
+		// 留空等于告诉下游「这条消息没有引用」，整段一起丢。
+		if len(pics) > 0 {
+			text = quotedPicOnly
+		} else {
+			text = quotedUnknown
+		}
+	}
+	return
+}
+
 // mentions 判断文本里是否叫了它的名字
+
 // refIdxOf 从事件的 message_scene.ext 里取出这条消息的引用 id。
 //
 // 官方文档说 message_reference 填的 message_id 要从 `message_scene.ext` 取；
@@ -686,7 +760,22 @@ func appendPart(sb *strings.Builder, s string) {
 //
 // 两种形式都认：裸的 `REFIDX_…`，以及 `msg_idx=` 带前缀的（后者是实测的形态）。
 // 认不出就返回空：那只是这条回复不带引用气泡，绝不影响它发出去。
-func refIdxOf(scene *webhook.MessageScene) string {
+//
+// 取「我引用了哪一条」用的是 refMsgIdxOf，两个 key 必须分开认——理由见那里。
+func refIdxOf(scene *webhook.MessageScene) string { return extRefIdx(scene, "msg_idx=") }
+
+// refMsgIdxOf 取这条消息**引用了哪一条**（被引用那条的引用 id）。
+//
+// 平台只给这个不透明的 id，作者和内容一个字都不给（实测，见 qqapi.QuoteIndex），
+// 所以它唯一的用途是拿去 QuoteIndex 反查本机见过的那条消息。
+//
+// 与 refIdxOf 必须是两个函数、不能合成一个「哪个 key 都认」的：
+// ext 里 `ref_msg_idx=…` 和 `msg_idx=…` 常常同时出现（引用别人的消息就同时有），
+// 认错了就会把「我引用了谁」当成「我是谁」，发送层拿它填 message_reference
+// 会让机器人引用到自己头上。
+func refMsgIdxOf(scene *webhook.MessageScene) string { return extRefIdx(scene, "ref_msg_idx=") }
+
+func extRefIdx(scene *webhook.MessageScene, key string) string {
 	if scene == nil {
 		return ""
 	}
@@ -695,7 +784,7 @@ func refIdxOf(scene *webhook.MessageScene) string {
 		if s == "" {
 			continue
 		}
-		if val, ok := strings.CutPrefix(s, "msg_idx="); ok {
+		if val, ok := strings.CutPrefix(s, key); ok {
 			s = strings.TrimSpace(val)
 		} else if strings.Contains(s, "=") && !strings.HasPrefix(s, "REFIDX") {
 			continue // ext 里别的 key=value（auth_token=…），不是引用 id
@@ -708,6 +797,7 @@ func refIdxOf(scene *webhook.MessageScene) string {
 	return ""
 }
 
+// mentions 判断文本里是否叫了它的名字
 func mentions(text, name string) bool {
 	name = strings.TrimSpace(name)
 	if name == "" {
