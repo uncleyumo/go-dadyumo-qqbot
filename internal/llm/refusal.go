@@ -36,18 +36,18 @@ var refusalMarkers = []string{
 	"prompt was blocked",
 	"blocked by our content policy",
 	"content policy violation",
-	"prohibited usage",           // Google's [Generative AI Prohibited Usage] policy
-	"prohibited_use",             // OpenRouter 的 block_reason 枚举
-	"safety system",              //
-	"content_filter",             // Azure 的 finish_reason
-	"content was filtered", //
+	"prohibited usage",            // Google's [Generative AI Prohibited Usage] policy
+	"prohibited_use",              // OpenRouter 的 block_reason 枚举
+	"safety system",               //
+	"content_filter",              // Azure 的 finish_reason
+	"content was filtered",        //
 	"violates our usage policies", // OpenAI
-	"responsible ai",             // Gemini 的 finishReason
-	"candidate was blocked",     //
-	"blocked by moderation",      //
-	"输入内容不符合",                  // 国内中转的常见中文说法
-	"内容涉及违规",                    //
-	"敏感词",                        //
+	"responsible ai",              // Gemini 的 finishReason
+	"candidate was blocked",       //
+	"blocked by moderation",       //
+	"输入内容不符合",                     // 国内中转的常见中文说法
+	"内容涉及违规",                      //
+	"敏感词",                         //
 }
 
 // looksLikeRefusal 判断正文是不是上游的拒绝说明而非模型回答。
@@ -112,7 +112,7 @@ func countLetters(s string) int {
 // 不带的话成本统计会凭空少记（与 emptyContentErr 同一个理由）。
 func refusalErr(content string, view TargetView, pt, ot int) *CallError {
 	return &CallError{
-		Kind:    ErrKindRefused,
+		Kind: ErrKindRefused,
 		Message: fmt.Sprintf("上游以正文形式拒绝了这次请求（model=%s endpoint=%s）: %s",
 			view.Model, view.EndpointID, string(truncateBytes([]byte(content), 120))),
 		PromptTokens: pt,

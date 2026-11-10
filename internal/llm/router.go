@@ -124,19 +124,37 @@ type snapshot struct {
 // exploreEpsilon 探路流量占比。设为变量是为了让测试能关掉它做确定性断言。
 var exploreEpsilon = 0.08
 
+// demoteAfterConsecFail 连续失败多少次后，目标不再享受 priority 硬分层。
+//
+// 单次失败可能只是限流或网络抖动；连续三次说明这条线当前不可靠。
+// 光靠冷却不够：冷却最长 5 分钟，而群聊的消息间隔常常比它长，
+// 于是一个已经连续失败的目标每次都会重新排到第一，把整条兜底链堵在它身上。
+// 降级后它只在其他目标都不可用时才再获得机会，一旦成功 ConsecFail 归零，
+// 自动回到原来的档位。
+const demoteAfterConsecFail = 3
+
+// demoteProbation 降级后的观察窗口：超过这么久没再被调用，就再给它一次机会。
+//
+// 没有这个窗口，降级等于永久下线：健康目标一直成功，它就永远轮不到，
+// ConsecFail 也就永远归不了零。代价是每 10 分钟最多浪费一次调用，
+// 换来一条修好的线路能自己回到池子里，不用人工点「重置」。
+const demoteProbation = 10 * time.Minute
+
 // Router 中央调用器
 type Router struct {
 	store *config.Store
 
-	mu       sync.RWMutex
-	targets  map[string]*Target
-	weights  Weight
-	maxTry   int
-	seq      uint64
-	lastErr  string
-	lastOK   time.Time
-	totalReq int64
-	failReq  int64
+	mu      sync.RWMutex
+	targets map[string]*Target
+	weights Weight
+	maxTry  int
+	// runnerUpRate 次位摇号概率。0=关。见 config.LLMConfig.RunnerUpRate。
+	runnerUpRate float64
+	seq          uint64
+	lastErr      string
+	lastOK       time.Time
+	totalReq     int64
+	failReq      int64
 
 	// stats 统计持久化（可为 nil，nil 时全部跳过，便于测试与降级）。
 	// 用独立原子指针而不是放在 mu 保护下：SetStats 只在启动时调一次，
@@ -314,6 +332,11 @@ func (r *Router) Reload() {
 		if maxTry <= 0 {
 			maxTry = 4
 		}
+		// 负值/超界直接当 0（关）；不回填默认，老配置零值即关闭。
+		r.runnerUpRate = cfg.LLM.RunnerUpRate
+		if r.runnerUpRate < 0 || r.runnerUpRate > 1 {
+			r.runnerUpRate = 0
+		}
 
 		anyStream := false
 		next := map[string]*Target{}
@@ -408,7 +431,8 @@ func (r *Router) Chat(ctx context.Context, req Request) (*Result, error) {
 	tried := map[string]bool{}
 	var lastErr error
 	var attempts int
-	refused := 0 // 被内容审核拒绝的目标数，用来判定「是不是内容的问题」
+	refused := 0     // 被内容审核拒绝的目标数，用来判定「是不是内容的问题」
+	badRequests := 0 // 判请求不合法的目标数，用来判定「是不是请求本身坏了」
 
 	for i := 0; i < maxTry; i++ {
 		// 剩余预算不够再跑一次有意义的尝试时就停手。外层 ctx 是整条链的总预算，
@@ -437,7 +461,11 @@ func (r *Router) Chat(ctx context.Context, req Request) (*Result, error) {
 		attempts++
 
 		start := time.Now()
-		res, cerr := Call(ctx, t, req)
+		// 告诉调用层「后面还剩几次机会」，让它把总预算按份额切开。
+		// 不传的话，第一个目标能按满配置超时（60s）独占整个决策预算。
+		attemptReq := req
+		attemptReq.AttemptsLeft = maxTry - i
+		res, cerr := Call(ctx, t, attemptReq)
 		if cerr == nil {
 			t.recordSuccess(res)
 			r.mu.Lock()
@@ -472,13 +500,18 @@ func (r *Router) Chat(ctx context.Context, req Request) (*Result, error) {
 			// 预算见底但父 ctx 还没到期（例如只剩 1s）：如实说预算不够，别谎称被取消
 			return nil, fmt.Errorf("预算耗尽: %w", cerr)
 		}
-		// 请求本身不合法（上下文超长、字段非法）：换目标也是同样的坏请求。
-		// 不记失败、不冷却，直接把错误交回调用方，别把健康目标一锅端。
+		// 请求被上游判成不合法（400/422）。**换一个目标试**：
+		// 池子里是不同厂商的模型，同一份请求在一家眼里非法、在另一家能过，
+		// 工具定义与参数的校验口径尤其不一致。不冷却——目标本身没病；
+		// 但要记进健康度，否则一个每次都拒绝请求的模型会一直显示健康。
+		// 只有所有尝试都以这一类错误告终时，才把它当请求本身的问题交回去。
 		if cerr.Kind == ErrKindBadRequest {
-			r.noteFail("请求不合法: " + cerr.Message)
-			logx.Warn("请求被上游拒绝，不重试也不冷却",
+			t.recordReject(cerr)
+			lastErr = cerr
+			badRequests++
+			logx.Warn("请求被上游拒绝，换下一个目标（不冷却本目标）",
 				"endpoint", view.EndpointName, "model", view.Model, "err", cerr.Error())
-			return nil, fmt.Errorf("请求被上游拒绝: %w", cerr)
+			continue
 		}
 
 		// 内容被上游审核拦下：要换目标（各家口径不同，换一家可能就过了），
@@ -519,6 +552,10 @@ func (r *Router) Chat(ctx context.Context, req Request) (*Result, error) {
 	// 上层要靠这个区分来决定是发一句嘴臭的兜底还是安静闭嘴，两者对用户的观感完全不同。
 	if refused == attempts {
 		return nil, fmt.Errorf("%w（已尝试 %d 个目标，全部被内容审核拒绝）", ErrAllRefused, attempts)
+	}
+	// 每个目标都判这份请求不合法：换目标解决不了，如实告诉调用方是请求问题。
+	if badRequests == attempts {
+		return nil, fmt.Errorf("请求被上游拒绝: %w", lastErr)
 	}
 	return nil, fmt.Errorf("所有接入点的所有模型均不可用（已尝试 %d 个）: %w", attempts, lastErr)
 }
@@ -650,6 +687,18 @@ func (r *Router) ordered(exclude map[string]bool, jitter, needVision bool) (snap
 	// 主力出事时不需要靠分数输给兜底：失败会立刻进冷却（见 observeFailure），
 	// 冷却中的目标根本不在这个候选集里，于是自然落到下一档。
 	sort.SliceStable(snaps, func(i, j int) bool {
+		// 连续失败够多的目标先整体沉底，再谈档位。
+		// 这一条让健康度真正参与跨档决策：priority 仍然是「健康时谁先上」的
+		// 硬分层，但一条连续失败三次的线不再配占着主力档。
+		// 过了观察窗口就重新当健康目标看待，避免降级变成永久下线。
+		demoted := func(s snapshot) bool {
+			return s.health.ConsecFail >= demoteAfterConsecFail &&
+				now.Sub(s.health.LastUsed) < demoteProbation
+		}
+		hi, hj := !demoted(snaps[i]), !demoted(snaps[j])
+		if hi != hj {
+			return hi
+		}
 		if snaps[i].view.Priority != snaps[j].view.Priority {
 			return snaps[i].view.Priority > snaps[j].view.Priority
 		}
@@ -720,6 +769,19 @@ func (r *Router) pick(tried map[string]bool, needVision bool) *Target {
 				}
 			}
 			return pool[rand.Intn(len(pool))].t
+		}
+		// 次位摇号：少量流量在排序第 1、2 名之间换位（可跨档），
+		// 换的是脑回路，用来压路径依赖。只摇前两名，第三名及以下不参与。
+		// 与上面的同档探路并列：探路管「同档别埋没」，这里管「偶尔换个人说话」。
+		// Boost 走 pickPreferred，不进本函数——提权轮次自然跳过彩蛋。
+		// 失败切换每轮重新 pick，彩蛋失败不特判，重摇即可。
+		// Reload 会在写锁内更新 runnerUpRate；这里必须同样走锁读，
+		// 否则 -race 下与热加载并发时是明确的数据竞争。
+		r.mu.RLock()
+		runnerUpRate := r.runnerUpRate
+		r.mu.RUnlock()
+		if runnerUpRate > 0 && len(snaps) >= 2 && rand.Float64() < runnerUpRate {
+			return snaps[1].t
 		}
 		return snaps[0].t
 	}
@@ -803,6 +865,14 @@ func (t *Target) recordFailure(cerr *CallError) time.Duration {
 	t.h.LastUsed = time.Now()
 	t.mu.Unlock()
 	return backoff
+}
+
+// recordReject 记一次「请求被上游判成不合法」。不进冷却，见 Health.observeReject。
+func (t *Target) recordReject(cerr *CallError) {
+	t.mu.Lock()
+	t.h.observeReject(cerr.Message)
+	t.h.LastUsed = time.Now()
+	t.mu.Unlock()
 }
 
 func (t *Target) markDead(msg string) {

@@ -49,7 +49,7 @@ func TestSchedulePresetMatchesAdminDropdown(t *testing.T) {
 	html := string(b)
 	start := strings.Index(html, `id="sch-mode"`)
 	if start < 0 {
-		t.Fatal("index.html 里找不到 <select id=\"sch-mode\">——"+
+		t.Fatal("index.html 里找不到 <select id=\"sch-mode\">——" +
 			"档位下拉改名或被删了，这条测试的断言对象已不存在")
 	}
 	rest := html[start:]

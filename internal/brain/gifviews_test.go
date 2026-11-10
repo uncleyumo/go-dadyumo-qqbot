@@ -108,7 +108,7 @@ func TestCollectMemeFromGIFFrameStoresAnimatedGIF(t *testing.T) {
 		t.Fatalf("素材不足：只拆出 %d 帧", len(views))
 	}
 	// 模型报的是「第 2 张」——在 views 的序号空间里
-	e.collectMemes(cfg, []Collect{{I: 2, D: "会动的猫"}}, views, srcs)
+	e.collectMemes(cfg, "GRP-TEST", []Collect{{I: 2, D: "会动的猫"}}, views, srcs)
 
 	if pool.Len() != 1 {
 		t.Fatalf("应收进 1 张，got %d", pool.Len())

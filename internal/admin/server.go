@@ -21,6 +21,7 @@ import (
 	"dadyumo/internal/memepool"
 	"dadyumo/internal/memory"
 	"dadyumo/internal/statsdb"
+	"dadyumo/internal/takeover"
 )
 
 //go:embed assets
@@ -50,6 +51,9 @@ type Server struct {
 	// 只有 handleMemoryClear 用得上：清记忆前要把原文件挪走备份，
 	// 而 memPersist 只是个闭包，拿不到路径。
 	memPath string
+
+	// anchors 锚点只读来源，由 main 注入。nil 时按「无锚点」返回，不 panic。
+	anchors takeover.AnchorSource
 }
 
 // New 创建管理端
@@ -128,6 +132,15 @@ func (s *Server) Handler(prefix string) http.Handler {
 	mux.HandleFunc(prefix+"/api/memes", s.auth(s.handleMemeList))
 	mux.HandleFunc(prefix+"/api/meme/img", s.auth(s.handleMemeImage))
 	mux.HandleFunc(prefix+"/api/memes/delete", s.auth(s.handleMemeDelete))
+
+	// 人工接管：7 条路由全部套 s.auth，统一校验在 internal/admin/takeover.go。
+	mux.HandleFunc(prefix+"/api/takeover/mode", s.auth(s.handleTakeoverMode))
+	mux.HandleFunc(prefix+"/api/takeover/lease", s.auth(s.handleTakeoverLease))
+	mux.HandleFunc(prefix+"/api/takeover/window", s.auth(s.handleTakeoverWindow))
+	mux.HandleFunc(prefix+"/api/takeover/members", s.auth(s.handleTakeoverMembers))
+	mux.HandleFunc(prefix+"/api/takeover/send", s.auth(s.handleTakeoverSend))
+	mux.HandleFunc(prefix+"/api/takeover/meme", s.auth(s.handleTakeoverMeme))
+	mux.HandleFunc(prefix+"/api/takeover/end_all", s.auth(s.handleTakeoverEndAll))
 
 	sub, err := fs.Sub(assetsFS, "assets")
 	if err != nil {
@@ -257,6 +270,10 @@ type state struct {
 	Groups   []groupView      `json:"groups"`
 	Master   masterView       `json:"master"`
 	Schedule scheduleView     `json:"schedule"`
+	// 接管汇总：群卡片徽标与仪表盘横幅靠这三项。
+	TakeoverGroups []string `json:"takeover_groups"`
+	TakeoverRev    int64    `json:"takeover_rev"`
+	Epoch          int64    `json:"epoch"`
 }
 
 // groupView 一个群的运行状态
@@ -281,6 +298,12 @@ type groupView struct {
 	FactsItems []memory.FactItem `json:"facts_items"` // 结构化长期要点（可编辑），按最后写入时间倒序
 	FactsMax   int               `json:"facts_max"`   // 上限，前端显示「已用 n/上限」
 	Members    []memory.Member   `json:"members"`
+	// 人工接管的派生状态。全部由 Engine 现算，admin 不缓存。
+	TakeoverMode  string `json:"takeover_mode"`
+	AIPaused      bool   `json:"ai_paused"`
+	PausedReason  string `json:"paused_reason"`
+	LeaseCount    int    `json:"lease_count"`
+	TakeoverSince int64  `json:"takeover_since"`
 }
 
 // masterView 开发者绑定与特权情况
@@ -355,6 +378,9 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	uptime := time.Since(s.startTime).Truncate(time.Second).String()
 
 	groups := make([]groupView, 0)
+	// 仪表盘横幅：此刻因接管而暂停的群。engine 为 nil 时各方法零值安全，
+	// 不会因为装配残缺让整个 /api/state 500。
+	takeoverGroups := make([]string, 0)
 	if s.mem != nil {
 		// 别名表：管理端给群起的人间名字，展示时优先于记忆里的代号
 		aliases := map[string]string{}
@@ -369,6 +395,10 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 				members = members[:20]
 			}
 			left, _ := g.Left()
+			paused, reason, since, leaseCount := s.engine.AIPauseInfo(g.OpenID)
+			if paused {
+				takeoverGroups = append(takeoverGroups, g.OpenID)
+			}
 			groups = append(groups, groupView{
 				OpenID: g.OpenID,
 				Name:   g.Name,
@@ -385,6 +415,12 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 				FactsItems:  g.FactsList(),
 				FactsMax:    memory.MaxFacts,
 				Members:     members,
+
+				TakeoverMode:  string(s.engine.TakeoverMode(g.OpenID)),
+				AIPaused:      paused,
+				PausedReason:  reason,
+				LeaseCount:    leaseCount,
+				TakeoverSince: since,
 			})
 		}
 	}
@@ -423,6 +459,9 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 				AtGrace: cfg.Schedule.AtGraceSec,
 			}
 		}(),
+		TakeoverGroups: takeoverGroups,
+		TakeoverRev:    s.engine.TakeoverRev(),
+		Epoch:          s.engine.TakeoverEpoch(),
 	})
 }
 
@@ -1016,6 +1055,9 @@ func (s *Server) handleGroupRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mem.RemoveGroup(body.OpenID)
 	s.persistMemory()
+	// 群被移除后接管状态一并清掉：always 随之结束，模式条目回默认 window。
+	// Engine 内部清租约/宽限/墓碑并调 Store.Delete；admin 不持 tkStore。
+	s.engine.DeleteTakeoverState(body.OpenID)
 	logx.Info("管理端已移除群数据", "group", body.OpenID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

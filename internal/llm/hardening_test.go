@@ -202,14 +202,14 @@ func TestEmptyContentFormsAreDistinguishable(t *testing.T) {
 // 否则外层预算 ≤ 单目标超时时 fallback 链对慢目标结构性失效。
 func TestAttemptBudget从父预算里扣(t *testing.T) {
 	// 无 deadline：拿满配置值
-	d, cerr := attemptBudget(context.Background(), 60*time.Second)
+	d, cerr := attemptBudget(context.Background(), 60*time.Second, 1)
 	if cerr != nil || d != 60*time.Second {
 		t.Errorf("无预算上限时应拿满配置值，实际 %v %v", d, cerr)
 	}
 	// 父预算比配置值小：以内层为准
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	d, cerr = attemptBudget(ctx, 60*time.Second)
+	d, cerr = attemptBudget(ctx, 60*time.Second, 1)
 	if cerr != nil {
 		t.Fatalf("父预算充足时不该报错: %v", cerr)
 	}
@@ -219,7 +219,7 @@ func TestAttemptBudget从父预算里扣(t *testing.T) {
 	// 父预算已经见底：立刻失败，别发起注定超时的请求
 	tiny, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel2()
-	d, cerr = attemptBudget(tiny, 60*time.Second)
+	d, cerr = attemptBudget(tiny, 60*time.Second, 1)
 	if cerr == nil {
 		t.Fatal("预算不足时必须直接返回错误")
 	}
@@ -231,6 +231,51 @@ func TestAttemptBudget从父预算里扣(t *testing.T) {
 	}
 	if enoughBudget(tiny, minAttemptBudget) {
 		t.Error("剩余预算不足时 enoughBudget 应为 false")
+	}
+}
+
+// TestAttemptBudgetReservesForLaterAttempts 剩余预算必须按剩余尝试次数切开：
+// 第一个目标不能把整条链的时间吃光，否则它会一直挂到父 ctx 到期，
+// 路由器按「调用方取消」收手，后面的兜底一次都走不到（2026-11-04 23:14 实况）。
+func TestAttemptBudgetReservesForLaterAttempts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	first, cerr := attemptBudget(ctx, 60*time.Second, 4)
+	if cerr != nil {
+		t.Fatalf("预算充足时不该报错: %v", cerr)
+	}
+	if first >= 60*time.Second {
+		t.Errorf("还有 4 次机会时第一次不该拿满 60s，实际 %v", first)
+	}
+	if first < 20*time.Second {
+		t.Errorf("第一次应拿到约 24s（够慢模型跑完），实际 %v", first)
+	}
+
+	last, cerr := attemptBudget(ctx, 60*time.Second, 1)
+	if cerr != nil {
+		t.Fatalf("最后一次不该报错: %v", cerr)
+	}
+	// 最后一次几乎用满剩余预算，只留 lastAttemptMargin 给父 ctx
+	if last > 60*time.Second || last < 60*time.Second-lastAttemptMargin-100*time.Millisecond {
+		t.Errorf("只剩一次时应用满剩余预算（留 %v 余量），实际 %v", lastAttemptMargin, last)
+	}
+}
+
+// TestSplitBudgetKeepsSixthAttemptReachable max_attempts=6 时，
+// 前五次不能把预算分到第六次连 minAttemptBudget 都拿不到——否则
+// 名义上是 6 次兜底，实际只有 5 次。
+func TestSplitBudgetKeepsSixthAttemptReachable(t *testing.T) {
+	remain := 60 * time.Second
+	for left := 6; left >= 1; left-- {
+		d := splitBudget(remain, 60*time.Second, left)
+		if d < minAttemptBudget {
+			t.Fatalf("第 %d 次只分到 %v，低于下限 %v", 7-left, d, minAttemptBudget)
+		}
+		if d > remain {
+			t.Fatalf("第 %d 次分到 %v，超过剩余 %v", 7-left, d, remain)
+		}
+		remain -= d
 	}
 }
 
@@ -296,9 +341,11 @@ func TestParentCancelNotChargedToTarget(t *testing.T) {
 	}
 }
 
-// TestBadRequestDoesNotCoolHealthyTargets 上下文超长返回 400 时，
-// 必须既不重试也不冷却：同一个坏请求发给 4 个目标会把 4 个健康目标一锅端。
-func TestBadRequestDoesNotCoolHealthyTargets(t *testing.T) {
+// TestBadRequestRetriesOtherTargetsWithoutCooling 请求被上游判成 400 时，
+// 必须换下一个目标继续试：池子里是不同厂商的模型，同一份请求在一家眼里
+// 非法、在另一家能过。不冷却，但失败要如实记进健康度——否则一个永远 400
+// 的模型会在面板上永远健康，连续失败也攒不起来。
+func TestBadRequestRetriesOtherTargetsWithoutCooling(t *testing.T) {
 	m := newMock()
 	for _, name := range []string{"m1", "m2", "m3", "m4"} {
 		m.on(name, func(w http.ResponseWriter, _ string, _ bool) {
@@ -318,12 +365,15 @@ func TestBadRequestDoesNotCoolHealthyTargets(t *testing.T) {
 		t.Errorf("错误信息应说明是请求本身不合法，实际: %v", err)
 	}
 	total := m.count("m1") + m.count("m2") + m.count("m3") + m.count("m4")
-	if total != 1 {
-		t.Errorf("坏请求只该发一次，实际发了 %d 次", total)
+	if total != 4 {
+		t.Errorf("400 应换目标继续试，4 个目标应各试一次，实际发了 %d 次", total)
 	}
 	for _, s := range r.Stats() {
-		if s.Cooling || s.Dead || s.Total != 0 {
-			t.Errorf("坏请求不应影响目标健康度: %+v", s)
+		if s.Cooling || s.Dead {
+			t.Errorf("400 不应冷却/下线目标: %+v", s)
+		}
+		if s.Total != 1 || s.ConsecFail != 1 {
+			t.Errorf("400 应如实记进健康度: %+v", s)
 		}
 	}
 }

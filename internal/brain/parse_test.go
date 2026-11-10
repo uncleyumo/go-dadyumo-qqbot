@@ -172,7 +172,7 @@ func TestLooksLikeSpeech(t *testing.T) {
 //
 // 这组用例必须逐条钉住「走的是哪条出口」：只看 os 非空是不够的，
 // 那两条出口本来就会带 os，测不出是不是被别的路径「碰巧」满足
-//（atothers_test.go 批评过这种假绿）。
+// （atothers_test.go 批评过这种假绿）。
 func TestParseDecisionQuietFallbackKeepsOS(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

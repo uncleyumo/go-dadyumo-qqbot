@@ -25,6 +25,7 @@ import (
 	"dadyumo/internal/memory"
 	"dadyumo/internal/qqapi"
 	"dadyumo/internal/statsdb"
+	"dadyumo/internal/takeover"
 	"dadyumo/internal/webhook"
 )
 
@@ -155,6 +156,16 @@ func main() {
 	engine := brain.NewEngine(store, router, mem, bot)
 	bot.SetEngine(engine)
 
+	// 人工接管：模式落盘在 data/takeover.json，锚点只读快照由 qqapi.Client 适配。
+	// 必须在回调服务启动前注入，否则第一条消息进来时闸门看到的还是「未装配」。
+	tkStore, err := takeover.Open(filepath.Join(cfg.Storage.DataDir, "takeover.json"))
+	if err != nil {
+		logx.Warn("接管模式文件初始化失败，按默认 window 运行", "err", err.Error())
+	}
+	engine.SetTakeoverStore(tkStore)
+	anchorSrc := anchorSource{cli: qqClient}
+	engine.SetTakeoverAnchors(anchorSrc)
+
 	// 表情包池。默认关闭；开启需要 MinIO 与 QQ 富媒体上传两条外部链路都通。
 	// 任一条没通就整体降级为「不发图」，绝不影响文字路径。
 	var memePool *memepool.Pool
@@ -163,6 +174,9 @@ func main() {
 		logx.Warn("表情包池未启用，本次只走纯文本", "err", err.Error())
 	} else if pool != nil {
 		engine.SetMemePool(pool, qqClient)
+		// 策展任务按来源群跳过被接管的群。必须在 Start 之前注入，
+		// 否则第一轮优选会照常消耗暂停群的图。
+		curator.SetPausedGroup(engine.AIPaused)
 		curator.Start(ctx) // 内部自己开 goroutine
 		memePool, memePoolPath = pool, poolPath
 		bg.Add(1)
@@ -226,6 +240,7 @@ func main() {
 		// 让管理端改完群记忆能立即落盘，而不是等 5 分钟的周期 flush
 		admin.SetMemoryPersist(func() error { return mem.SaveTo(memPath) })
 		admin.SetMemoryPath(memPath)
+		admin.SetTakeoverAnchors(anchorSrc)
 		if memePool != nil {
 			path := memePoolPath
 			admin.SetMemePool(memePool, func() error { return memePool.Save(path) })
@@ -364,5 +379,54 @@ func statsFlushLoop(ctx context.Context, router *llm.Router) {
 		case <-ticker.C:
 			router.FlushTargets()
 		}
+	}
+}
+
+// anchorSource 用 qqapi.Client 实现 takeover.AnchorSource。
+//
+// brain 与 admin 只依赖这个窄接口，不 import qqapi；快照不带 ref_idx / seq，
+// 真正发送仍由 Client.SendGroupTo 在锁内 PickAndReserve 重新选点，额度以实际占用为准。
+type anchorSource struct{ cli *qqapi.Client }
+
+// PickAnchor 按群挑一条存活锚点；preferSender 非空时优先此人的最新锚点。
+// matched=false 表示退回了群里最新那条（不是他要的人）。
+func (a anchorSource) PickAnchor(groupOpenID, preferSender string) (takeover.AnchorSnapshot, bool, bool) {
+	for _, it := range a.cli.Window(groupOpenID, preferSender) {
+		if !it.Alive {
+			continue
+		}
+		return toTakeoverSnapshot(it), preferSender == "" || it.SenderOpenID == preferSender, true
+	}
+	return takeover.AnchorSnapshot{}, false, false
+}
+
+// ListAnchors 返回池里保留的全部锚点（最新在前，含过期/用满）与其中存活条数。
+func (a anchorSource) ListAnchors(groupOpenID string) ([]takeover.AnchorSnapshot, int) {
+	info := a.cli.ListAnchors(groupOpenID)
+	out := make([]takeover.AnchorSnapshot, 0, len(info))
+	alive := 0
+	for _, it := range info {
+		s := toTakeoverSnapshot(it)
+		if s.Alive {
+			alive++
+		}
+		out = append(out, s)
+	}
+	return out, alive
+}
+
+// AnchorGroups 返回锚点池里有记录的群（含已无存活锚点的群），供 EndAll 用。
+func (a anchorSource) AnchorGroups() []string { return a.cli.AnchorGroups() }
+
+// toTakeoverSnapshot 把 qqapi.AnchorInfo 转成只读副本。
+func toTakeoverSnapshot(it qqapi.AnchorInfo) takeover.AnchorSnapshot {
+	return takeover.AnchorSnapshot{
+		MsgID:        it.MsgID,
+		SenderOpenID: it.SenderOpenID,
+		SenderName:   it.SenderName,
+		Used:         it.Used,
+		MaxUse:       it.MaxUse,
+		Alive:        it.Alive,
+		ExpiresAt:    it.ExpiresAt,
 	}
 }

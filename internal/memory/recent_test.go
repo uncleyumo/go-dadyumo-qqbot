@@ -100,8 +100,8 @@ func TestRecentDropsExpiredOnLoad(t *testing.T) {
 // 唯一能分开的是 **recent_at 与记录时间分处 6 小时的两侧**：
 //   - recent_at = T-1h（文件一小时前落盘）
 //   - 记录时间  = T-7h（这条消息在落盘前 6 小时就已写出）
-//   以 recent_at 为准：age = 6h ≤ 6h → 保留
-//   以 now 为基准：    age = 7h > 6h → 丢弃
+//     以 recent_at 为准：age = 6h ≤ 6h → 保留
+//     以 now 为基准：    age = 7h > 6h → 丢弃
 func TestRecentAgeUsesSnapshotTimeNotNow(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "memory.json")

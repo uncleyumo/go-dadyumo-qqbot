@@ -32,7 +32,7 @@ const maxCollectPerRound = 3
 // 用 dataURLs 取图的话，池子里会多一张不会动的表情包——
 // 2026-10-01 那次 GIF 被压成静图的事故换个入口重演一遍，
 // 而 memepool 自己的测试抓不到（它直接调 Add，不经过这里）。
-func (e *Engine) collectMemes(cfg config.Config, items []Collect, dataURLs, poolSrcs []string) {
+func (e *Engine) collectMemes(cfg config.Config, groupID string, items []Collect, dataURLs, poolSrcs []string) {
 	if len(items) == 0 || len(poolSrcs) == 0 {
 		return
 	}
@@ -59,7 +59,7 @@ func (e *Engine) collectMemes(cfg config.Config, items []Collect, dataURLs, pool
 			logx.Warn("图片解不开，收编跳过", "序号", it.I, "err", err.Error())
 			continue
 		}
-		id, err := pool.Add(data, mime, it.D, now)
+		id, err := pool.AddFrom(data, mime, it.D, groupID, now)
 		if err != nil {
 			// ErrNotFound 那类不该出现（Add 只在存储失败时返回错误），
 			// 一律当「这张收不进」处理，绝不能让它把整轮决策带崩。

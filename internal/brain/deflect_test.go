@@ -108,6 +108,7 @@ func TestFallbackLinesNeverEnterPrompt(t *testing.T) {
 		t.Error("口头禅本应进系统提示词；它没进，说明上面这条断言是假通过")
 	}
 }
+
 // 两个池子必须互斥，一轮只发一句。
 //
 // 混池随机抽必然错配：被点名了回「牛逼」像敷衍，

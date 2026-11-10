@@ -12,6 +12,7 @@
 package memepool
 
 import (
+	"context"
 	"crypto/sha1"
 	"fmt"
 	"math"
@@ -27,11 +28,14 @@ type Meme struct {
 	ID        int64
 	ObjectKey string // MinIO 对象名
 	Descr     string // 模型给的描述，模型选图全靠它
-	AddedAt   time.Time
-	Uses      int
-	LastUsed  time.Time
-	Quality   float64 // 优选任务给的评分 0~1
-	ExpiresAt time.Time
+	// SourceGroup 是这张图来自哪个群。策展任务按来源群过滤被接管的群，
+	// 空串表示旧数据/来源未知，照常参与优选。
+	SourceGroup string
+	AddedAt     time.Time
+	Uses        int
+	LastUsed    time.Time
+	Quality     float64 // 优选任务给的评分 0~1
+	ExpiresAt   time.Time
 }
 
 // Config 池子的行为参数。
@@ -140,15 +144,21 @@ func New(cfg Config, storage Storage) *Pool {
 	}
 }
 
-// Add 收编一张图：压缩后存进 storage，元数据入池。
+// Add 收编一张图，来源群未知（旧调用点与旧数据的形态）。
+func (p *Pool) Add(data []byte, contentType, descr string, now time.Time) (int64, error) {
+	return p.AddFrom(data, contentType, descr, "", now)
+}
+
+// AddFrom 收编一张图并记下来源群：压缩后存进 storage，元数据入池。
 //
 // contentType 由调用方给出（imgproc.Fetch 会返回）。返回池内短 ID，
-// 模型在交付轮用它指认要发哪张。
+// 模型在交付轮用它指认要发哪张。sourceGroup 供策展任务按群隔离，
+// 空串表示来源未知，不会被任何群的接管过滤掉。
 //
 // ID 是自增短号（1、2、3…），**不是**内容哈希。哈希有 19 位，
 // 让模型逐位抄进 {"t":"img","id":…} 迟早抄错，前端 JSON 也过不了 2^53。
 // 内容哈希只用来做对象名与判重。
-func (p *Pool) Add(data []byte, contentType, descr string, now time.Time) (int64, error) {
+func (p *Pool) AddFrom(data []byte, contentType, descr, sourceGroup string, now time.Time) (int64, error) {
 	if p.storage == nil {
 		return 0, ErrNoStorage
 	}
@@ -175,12 +185,13 @@ func (p *Pool) Add(data []byte, contentType, descr string, now time.Time) (int64
 	id := p.nextID
 	p.nextID++
 	m := &Meme{
-		ID:        id,
-		ObjectKey: objName,
-		Descr:     descr,
-		AddedAt:   now,
-		Quality:   0.5, // 刚入库的中性分，等优选任务来打分
-		ExpiresAt: now.Add(p.cfg.MaxResidency),
+		ID:          id,
+		ObjectKey:   objName,
+		Descr:       descr,
+		SourceGroup: sourceGroup,
+		AddedAt:     now,
+		Quality:     0.5, // 刚入库的中性分，等优选任务来打分
+		ExpiresAt:   now.Add(p.cfg.MaxResidency),
 	}
 	p.memes[id] = m
 	p.byKey[objName] = id
@@ -233,6 +244,33 @@ func (p *Pool) Data(id int64) ([]byte, string, error) {
 	}
 	if p.storage == nil {
 		return nil, "", ErrNoStorage
+	}
+	return p.storage.Get(m.ObjectKey)
+}
+
+// ctxStorage 是 Storage 的可选扩展：能从调用方 ctx 里拿到取消/超时。
+//
+// 不把 GetCtx 加进 Storage 接口，是因为大量测试桩只实现了三个老方法，
+// 为了管理端 25 秒发送预算改接口会让所有桩跟着改。按类型断言取扩展能力，
+// 没实现的桩退回 Get 即可。
+type ctxStorage interface {
+	GetCtx(ctx context.Context, key string) ([]byte, string, error)
+}
+
+// DataCtx 与 Data 相同，但把调用方的 ctx 透传给支持它的存储后端，
+// 让 MinIO 取图能被手动发送的总预算（25 秒）取消。
+func (p *Pool) DataCtx(ctx context.Context, id int64) ([]byte, string, error) {
+	p.mu.Lock()
+	m, ok := p.memes[id]
+	p.mu.Unlock()
+	if !ok {
+		return nil, "", ErrNotFound
+	}
+	if p.storage == nil {
+		return nil, "", ErrNoStorage
+	}
+	if cs, ok := p.storage.(ctxStorage); ok {
+		return cs.GetCtx(ctx, m.ObjectKey)
 	}
 	return p.storage.Get(m.ObjectKey)
 }

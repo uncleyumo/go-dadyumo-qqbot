@@ -41,6 +41,9 @@ const hardMaxOutTokens = 8192
 // 发起请求只是白白消耗一轮重试机会，不如立刻把「预算耗尽」告诉调用方。
 const minAttemptBudget = 3 * time.Second
 
+// lastAttemptMargin 最后一次尝试留给父 ctx 的余量，见 attemptBudget。
+const lastAttemptMargin = 500 * time.Millisecond
+
 // Message 对话消息。
 // Images 非空时表示这条消息带图（data URI），序列化时按协议方言转成多模态 parts。
 type Message struct {
@@ -97,6 +100,11 @@ type Request struct {
 	// 用途见 memory.Group.boosted：某个模型替这个群兜底成功后，
 	// 接下来几轮优先问它，省掉「主力每轮都被拒、每次都白烧一次」的浪费。
 	PreferredKeys []string
+
+	// AttemptsLeft 本次尝试之后还剩几次机会（含本次，由路由层填；0 视为 1）。
+	// 用来把调用方的总预算按剩余次数切开：否则第一个目标一挂，
+	// 它自己就能吃掉整个 60 秒，后面的兜底连一秒都分不到。
+	AttemptsLeft int
 }
 
 // 两种方言的多模态/工具报文形状并不一样，各用一个类型。
@@ -116,7 +124,7 @@ type chatMsg struct {
 	// tool 结果要带 tool_call_id —— 缺了直接报
 	// "tool messages must include a non-empty string tool_call_id"。
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
 }
 
 type chatToolCall struct {
@@ -303,12 +311,28 @@ type ctxErrFn func() *CallError
 // ---- chat/completions 报文 ----
 
 type chatRequest struct {
-	Model       string    `json:"model"`
-	Messages    []chatMsg `json:"messages"`
-	Tools       []Tool    `json:"tools,omitempty"`
-	Temperature float64   `json:"temperature,omitempty"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-	Stream      bool      `json:"stream,omitempty"`
+	Model       string        `json:"model"`
+	Messages    []chatMsg     `json:"messages"`
+	Tools       []chatToolDef `json:"tools,omitempty"`
+	Temperature float64       `json:"temperature,omitempty"`
+	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Stream      bool          `json:"stream,omitempty"`
+}
+
+// chatToolDef 是 chat/completions 的工具定义。
+//
+// 规范要求外面套一层 {"type":"function","function":{"name":...}}。
+// 直接发扁平的 {"name":...} 会被严格校验的上游判成 400，
+// 而 new-api 只会把它包装成一句 bad_response_status_code——
+// 2026-11-04 生产日志里正是这条错误让第二个模型失败、整条兜底链提前终止。
+// Responses 那边用的是扁平形状，两者不能共用，见 responsesTools。
+type chatToolDef struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string         `json:"name"`
+		Description string         `json:"description"`
+		Parameters  map[string]any `json:"parameters"`
+	} `json:"function"`
 }
 
 // contentText 解析 content 字段。绝大多数上游给字符串，但有两处必须分开：
@@ -516,7 +540,7 @@ func Call(ctx context.Context, t *Target, req Request) (*Result, *CallError) {
 		return nil, &CallError{Kind: ErrKindNetwork, Message: "目标为空"}
 	}
 	view := t.snap()
-	timeout, cerr := attemptBudget(ctx, view.Timeout)
+	timeout, cerr := attemptBudget(ctx, view.Timeout, req.AttemptsLeft)
 	if cerr != nil {
 		return nil, cerr
 	}
@@ -551,11 +575,20 @@ func Call(ctx context.Context, t *Target, req Request) (*Result, *CallError) {
 }
 
 // attemptBudget 从调用方 ctx 的剩余时间里扣出本次尝试的超时。
-// 外层预算是整条 fallback 链的总预算，内层超时只是它的上限：
-// 两者各拿满配置值时，第 2 个目标永远等不到（第一个一慢，预算就见底了）。
-func attemptBudget(ctx context.Context, configured time.Duration) (time.Duration, *CallError) {
+//
+// 外层预算是整条 fallback 链的总预算，内层超时只是它的上限。
+// 关键在于**按剩余尝试次数切**：只取 min(剩余, 配置值) 是不够的——
+// 两者各拿满配置值（60s vs 60s）时，第一个目标一慢就会把预算彻底耗光，
+// 第 2 个目标永远等不到。2026-11-04 23:14 的生产日志就是这种形态：
+// amd 挂满 60 秒，父 ctx 到期，路由器按「调用方取消」直接收手，一条兜底都没走。
+//
+// 具体的切法见 splitBudget。
+func attemptBudget(ctx context.Context, configured time.Duration, attemptsLeft int) (time.Duration, *CallError) {
 	if configured <= 0 {
 		configured = 60 * time.Second
+	}
+	if attemptsLeft < 1 {
+		attemptsLeft = 1
 	}
 	dl, ok := ctx.Deadline()
 	if !ok {
@@ -570,10 +603,44 @@ func attemptBudget(ctx context.Context, configured time.Duration) (time.Duration
 				remain.Round(time.Millisecond), minAttemptBudget),
 		}
 	}
-	if remain < configured {
-		return remain, nil
+	return splitBudget(remain, configured, attemptsLeft), nil
+}
+
+// attemptSlack 每次尝试之间的固定开销余量（记账、日志、建连）。
+// 给后续每次尝试预留预算时要把这点算进去，否则预留恰好等于下限，
+// 轮到它时剩余已经因为开销跌破下限，名义上还有一次、实际发起不了。
+const attemptSlack = 250 * time.Millisecond
+
+// splitBudget 在给定剩余时间里切出本次尝试的超时。纯函数，便于测试。
+//
+// 比例是 2/(n+1)：n=4 时依次约 40% / 30% / 20% / 10%。
+// 主力拿最大的一份，同时给后面每一次留出「下限 + 开销余量」，
+// 保证 max_attempts=6 时第六次真的能发起，而不是被前几次分光预算。
+// 只剩一次时留 lastAttemptMargin 给父 ctx，见下方注释。
+func splitBudget(remain, configured time.Duration, attemptsLeft int) time.Duration {
+	if attemptsLeft < 1 {
+		attemptsLeft = 1
 	}
-	return configured, nil
+	share := remain * 2 / time.Duration(attemptsLeft+1)
+	if reserve := (minAttemptBudget + attemptSlack) * time.Duration(attemptsLeft-1); share > remain-reserve {
+		share = remain - reserve
+	}
+	if attemptsLeft == 1 {
+		// 最后一次尝试留一点余量给父 ctx，让「本次尝试自己超时」先发生。
+		// 否则父 ctx 先到期，这次超时会被判成调用方取消（External），
+		// 目标既不进冷却也不累计连续失败——一个每次都挂住的模型永远不会降级。
+		share = remain - lastAttemptMargin
+		if share < minAttemptBudget {
+			share = remain
+		}
+	}
+	if share < minAttemptBudget {
+		share = minAttemptBudget
+	}
+	if share < configured {
+		return share
+	}
+	return configured
 }
 
 // enoughBudget 剩余预算是否还够再跑一次尝试。宁可如实失败，
@@ -712,7 +779,7 @@ func buildPayload(t TargetView, req Request, maxTokens int) (string, []byte, *Ca
 		payload = chatRequest{
 			Model:       t.Model,
 			Messages:    wire,
-			Tools:       req.Tools, // chat 方言的 tools 不用包 type 字段，直接就是函数声明
+			Tools:       chatTools(req.Tools),
 			Temperature: req.Temperature,
 			MaxTokens:   maxTokens,
 			Stream:      t.Stream,
@@ -729,8 +796,8 @@ func buildPayload(t TargetView, req Request, maxTokens int) (string, []byte, *Ca
 
 // responsesTools 把内部 Tool 转成 Responses API 要的形状。
 //
-// chat/completions 的 tools 数组里直接就是函数声明，Responses 多一层
-// {"type":"function"} 壳——两边不通用，所以这里转一次而不是共用 Tool。
+// chat/completions 的 tools 数组里是 {"type":"function","function":{...}} 的嵌套形状，
+// Responses 是 {"type":"function",...} 的扁平形状——两边不通用，所以这里转一次而不是共用 Tool。
 func responsesTools(tools []Tool) []map[string]any {
 	if len(tools) == 0 {
 		return nil
@@ -743,6 +810,24 @@ func responsesTools(tools []Tool) []map[string]any {
 			"description": t.Description,
 			"parameters":  t.Parameters,
 		})
+	}
+	return out
+}
+
+// chatTools 把内部 Tool 转成 chat/completions 要的形状。
+// 与 responsesTools 分开：两边的外层结构不同，共用一个转换器必然写错一边。
+func chatTools(tools []Tool) []chatToolDef {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]chatToolDef, 0, len(tools))
+	for _, t := range tools {
+		var c chatToolDef
+		c.Type = "function"
+		c.Function.Name = t.Name
+		c.Function.Description = t.Description
+		c.Function.Parameters = t.Parameters
+		out = append(out, c)
 	}
 	return out
 }

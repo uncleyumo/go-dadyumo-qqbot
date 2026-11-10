@@ -209,6 +209,11 @@ type AdminConfig struct {
 type LLMConfig struct {
 	Endpoints   []Endpoint `json:"endpoints"`
 	MaxAttempts int        `json:"max_attempts"` // 单次请求最多尝试多少个目标，默认 4
+	// RunnerUpRate 次位摇号概率（0~1，默认 0=关）。
+	// 每次 pick 时以该概率改选当前排序的第 2 名（只在前两名之间摇，不落到第三）。
+	// 用来在「主力 + 次位」之间制造少量脑回路切换，压制路径依赖；
+	// 彩蛋调用失败走既有换目标链路自然重摇，不特判。
+	RunnerUpRate float64 `json:"runner_up_rate"`
 	// 排序权重，用于健康度打分
 	Weights WeightConfig `json:"weights"`
 }
@@ -250,8 +255,9 @@ type Model struct {
 	Label   string `json:"label"` // 展示名
 	Enabled bool   `json:"enabled"`
 	// Priority 优先级，数值越大越优先（默认 0）。
-	// 主力模型给 1，免费兜底给 0：只要主力健康就永远走主力，
-	// 主力连续失败时扣分会盖过优先级加成，流量自动切到兜底。
+	// 主力模型给 1，免费兜底给 0：只要主力健康就永远走主力；
+	// 连续失败达到阈值后会被排到健康目标之后（见 llm.demoteAfterConsecFail），
+	// 成功一次即恢复原档位。
 	Priority int  `json:"priority"`
 	MaxCtx   int  `json:"max_ctx"` // 上下文上限，用于裁剪历史
 	MaxOut   int  `json:"max_out"` // 最大输出 token

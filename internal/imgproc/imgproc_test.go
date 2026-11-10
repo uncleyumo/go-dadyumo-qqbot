@@ -103,4 +103,3 @@ func TestCompressImageUnknownFormatPassesThrough(t *testing.T) {
 		t.Fatal("解不了的格式不应声称压缩成功")
 	}
 }
-

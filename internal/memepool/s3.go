@@ -103,7 +103,19 @@ func (s *S3Storage) Put(key string, data []byte, contentType string) error {
 func (s *S3Storage) Get(key string) ([]byte, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.client.Timeout)
 	defer cancel()
+	return s.GetCtx(ctx, key)
+}
 
+// GetCtx 与 Get 相同，但用调用方的 ctx 控制超时/取消。
+//
+// 管理端手动发表情包有 25 秒总预算，MinIO 取图与 QQ 上传是串行的两段；
+// 取图这一段必须能被总预算取消，否则上传会等到客户端默认超时才失败。
+func (s *S3Storage) GetCtx(ctx context.Context, key string) ([]byte, string, error) {
+	if ctx == nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), s.client.Timeout)
+		defer cancel()
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url(key), nil)
 	if err != nil {
 		return nil, "", err

@@ -27,8 +27,12 @@ type Curator struct {
 	optEvery time.Duration
 	// optBatch 一批过多少张。只给描述、不给图——判断「这张图配不配得上
 	// 当表情包」靠描述就够了，给图会让每轮 token 翻几倍。
-	optBatch int
+	optBatch  int
 	optMaxOut int
+
+	// pausedGroup 判断某来源群是否处于人工接管。nil 表示不过滤。
+	// 存函数而不是注入 brain：memepool 不依赖 brain，main 把 engine.AIPaused 传进来。
+	pausedGroup func(string) bool
 }
 
 // ConfigSource 提供当前配置（优选任务要用最便宜的模型）
@@ -68,6 +72,17 @@ func (c *Curator) SetInterval(d time.Duration) {
 	}
 }
 
+// SetPausedGroup 注入「该来源群是否被人工接管」的判定。
+//
+// 按来源群跳过，而不是整池停：一个群接管不该让其他群的表情包停止更新。
+// 来源未知（SourceGroup 为空）的旧数据不过滤，否则加字段等于把旧池子冻住。
+func (c *Curator) SetPausedGroup(f func(string) bool) {
+	if c == nil {
+		return
+	}
+	c.pausedGroup = f
+}
+
 // Start 在后台循环跑优选，直到 ctx 取消。
 //
 // 首次不立即跑：刚启动时池子里的图都是新鲜的没什么可清的，
@@ -90,6 +105,21 @@ func (c *Curator) Start(ctx context.Context) {
 	}()
 }
 
+// filterPausedMemes 去掉来源群被接管的候选。
+//
+// SourceGroup 为空的旧数据视为「来源未知」，不参与过滤：加字段之前收的图
+// 不能因为不知道来源就被冻住，否则升级后旧池子永远不会再被优选。
+func filterPausedMemes(pool []Meme, paused func(string) bool) []Meme {
+	kept := pool[:0]
+	for _, m := range pool {
+		if m.SourceGroup != "" && paused(m.SourceGroup) {
+			continue
+		}
+		kept = append(kept, m)
+	}
+	return kept
+}
+
 // runOnce 跑一轮。导出给测试直接调用。
 func (c *Curator) runOnce(ctx context.Context) {
 	// 总开关（闸门四）。判在 runOnce 而不只是 ticker 里，是因为测试与将来的
@@ -101,6 +131,15 @@ func (c *Curator) runOnce(ctx context.Context) {
 	pool := c.pool.Browse(time.Now())
 	if len(pool) == 0 {
 		return
+	}
+	// 按来源群过滤：被接管的群里收进来的图，本轮不打分。
+	// 全部被过滤就整轮跳过，不调模型——这才是「一个群接管不拖累全池」。
+	if c.pausedGroup != nil {
+		pool = filterPausedMemes(pool, c.pausedGroup)
+		if len(pool) == 0 {
+			logx.Info("表情包优选跳过：候选都来自被接管的群")
+			return
+		}
 	}
 
 	scores, err := c.judge(ctx, pool)

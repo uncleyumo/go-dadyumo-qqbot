@@ -39,7 +39,17 @@ import (
 	"dadyumo/internal/logx"
 	"dadyumo/internal/memepool"
 	"dadyumo/internal/memory"
+	"dadyumo/internal/takeover"
 )
+
+// maxImagesPerRequest 单次请求最多带几张图（含 GIF 拆帧与视频帧）。
+//
+// 上游对一条请求里的图片数量有硬上限，Qwen3.8-27B 实测是 5 张
+// （"At most 5 image(s) may be provided in one prompt"）。
+// config 的 max_images_per_call 管的是「给几张原图」，而 GIF 拆帧和视频帧
+// 会在这个额度之外单独加名额，最坏能堆到 3+5=8 张——超过上游上限
+// 就是一整次 400，白烧一次调用。2026-11-04 23:26 生产实况。
+const maxImagesPerRequest = 5
 
 // Sender 发送通道，由上层（agent）注入，方便测试时替换。
 //
@@ -177,6 +187,36 @@ type Engine struct {
 	// imgSender 发送图片的能力。brain 只依赖这个窄接口，
 	// 实际实现是 qqapi.Client——这样 brain 的测试不需要真实客户端。
 	imgSender ImageSender
+
+	// tkStore 接管模式存储，由 main 注入；nil 时一律按「未暂停」处理。
+	tkStore *takeover.Store
+	// anchors 锚点快照来源，由 main 注入；nil 时按「无锚点」处理，不 panic。
+	anchors takeover.AnchorSource
+
+	// tkMu 保护下面四个字段，是叶子锁：持有它时不得取 Store.mu / st.mu / mem 锁。
+	//
+	// 锁序（写死，改之前先看设计文档 §2.4）：
+	//   1. tkMu 与 takeover.Store.mu 都是叶子锁，同时需要时先 Store.Mode 短读释放，再取 tkMu。
+	//   2. 持有 tkMu 时绝不写盘、绝不取 st.mu、绝不取 mem 锁。
+	//   3. 需要清攒批状态时，先释放 tkMu，再取 st.mu。
+	tkMu    sync.Mutex
+	leases  map[string]map[string]*lease
+	closing map[string]map[string]closingRec
+	tomb    map[string]time.Time
+	tkRev   int64
+	// tkGen 是状态清理代号。ClearTakeoverState / EndAll 在 tkMu 内递增，
+	// AcquireLease 用它检测「读模式之后、建租约之前」是否发生过并发清理。
+	tkGen int64
+	// tkBoot 是 Engine 创建时刻（unix 秒）。takeover_rev 的高位用它做基数，
+	// 进程重启后 tkRev 归零也不会让管理端把新快照当成旧快照丢掉。
+	tkBoot int64
+	tkNow  func() time.Time
+
+	// sendMu 每群一把手动发送锁（groupID -> *sync.Mutex），TryLock 失败返回 busy。
+	sendMu sync.Map
+	// manualMu 保护 manualDedupe；网络发送期间不持有它。
+	manualMu     sync.Mutex
+	manualDedupe map[string]manualDedupeEntry
 }
 
 // ImageSender 发图片的能力
@@ -281,6 +321,13 @@ func NewEngine(store *config.Store, router *llm.Router, mem *memory.Store, sende
 		sender: sender,
 		states: map[string]*groupState{},
 		stat:   DailyStat{Day: time.Now().Format("2006-01-02")},
+
+		leases:       map[string]map[string]*lease{},
+		closing:      map[string]map[string]closingRec{},
+		tomb:         map[string]time.Time{},
+		manualDedupe: map[string]manualDedupeEntry{},
+		tkBoot:       time.Now().Unix(),
+		tkNow:        time.Now,
 	}
 }
 
@@ -351,6 +398,15 @@ func (e *Engine) OnMessage(ev *Event) {
 		Content: content, MsgID: ev.MsgID,
 	}, cfg.Brain.MaxHistory)
 	g.MarkUserTurn()
+
+	// 人工接管（主拦截）。必须放在成员表、消息入上下文、MarkUserTurn 之后：
+	// 接管期间这些登记照常写，AI 只是不排程、不发送。锚点登记与引用索引
+	// 在 agent 层更早发生，也不能挡——否则接管解除后引用反查会缺料。
+	if e.aiPausedByTakeover(ev.GroupID) {
+		logx.InfoCat(logx.CatDecision, "跳过：该群正在人工接管",
+			"group", groupLabel(g), "位置", "消息入口")
+		return
+	}
 
 	// 认主口令：群里回调只给 openid，这是把「我的 QQ 号」和 openid 对上的唯一途径
 	if cfg.Master.BindEnabled && strings.HasPrefix(content, "#认主") {
@@ -622,6 +678,13 @@ func (e *Engine) fire(groupID string) {
 			"group", groupLabel(g), "位置", "攒批到期")
 		return
 	}
+	// 人工接管（闸门二）。与总开关并列：OnMessage 只拦新消息，拦不住
+	// 接管开始前就排好的 time.AfterFunc。
+	if e.aiPausedByTakeover(groupID) {
+		logx.InfoCat(logx.CatDecision, "跳过：该群正在人工接管",
+			"group", groupLabel(g), "位置", "攒批到期")
+		return
+	}
 
 	st.mu.Lock()
 	if st.firing {
@@ -671,12 +734,15 @@ func (e *Engine) fire(groupID string) {
 	st.mu.Unlock()
 
 	defer func() {
+		// 先算 blocked 再取 st.mu：aiPauseState 内部会取 tkMu，
+		// 持 st.mu 再取 tkMu 与 OnMessage/decide 的锁序相反，会 ABBA 死锁。
+		blocked := e.aiPausedByTakeover(groupID)
 		st.mu.Lock()
 		st.firing = false
 		pending := st.pendingFire
 		st.pendingFire = false
 		// 还有排着的定时器就别重复排——它自己会来叫这一轮。
-		if pending && st.timer == nil && st.newCount > 0 {
+		if !blocked && pending && st.timer == nil && st.newCount > 0 {
 			e.scheduleLocked(st, cfg, groupID)
 		}
 		st.mu.Unlock()
@@ -764,6 +830,14 @@ func (e *Engine) fire(groupID string) {
 		return
 	}
 
+	// 人工接管（4a）：媒体管道之前再判一次。ASR、视频下载、ffmpeg、转写
+	// 很贵，接管期间不该为一个不会发送的结果付费。
+	if e.aiPausedByTakeover(groupID) {
+		logx.InfoCat(logx.CatDecision, "跳过：该群正在人工接管",
+			"group", groupLabel(g), "位置", "媒体处理前")
+		return
+	}
+
 	// 视频/语音处理放在所有闸门之后：在线率没摇中、预算用尽、静默期都不该为它花流量。
 	// 用独立 ctx 而不是 decide 的 60s——下载+ffmpeg+转写可能要几十秒，
 	// 不能挤占模型调用的超时预算。
@@ -780,6 +854,14 @@ func (e *Engine) fire(groupID string) {
 			mediaNote += vres.note
 		}
 		vcancel()
+	}
+
+	// 人工接管（4b）：兜住「媒体处理期间开始接管」。4a 放行时还没有租约，
+	// 而下载+转写要几十秒，期间管理员完全可能已经打开窗口。
+	if e.aiPausedByTakeover(groupID) {
+		logx.InfoCat(logx.CatDecision, "跳过：该群正在人工接管",
+			"group", groupLabel(g), "位置", "媒体处理后")
+		return
 	}
 
 	trigger := buildTrigger(atMe, nameCalled, fromMaster, question, replyToBot, faceSpam, atOthers, newCount, triggerName, atAll)
@@ -980,6 +1062,7 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 	}
 	// 有池子的时候才告诉它「序号」怎么算：收图这件事只有池子开着才有意义，
 	// 没有它就别在上下文里多塞一句模型用不上的规则。
+	dataURLs, poolSrcs = capImages(dataURLs, poolSrcs)
 	if len(dataURLs) > 0 && e.poolOf(cfg) != nil {
 		notes = append(notes, fmt.Sprintf(
 			"这轮给你看了 %d 张图，序号 1 到 %d（按你看到的顺序）。看到有梗的，用 collect 报给我。", len(dataURLs), len(dataURLs)))
@@ -1013,6 +1096,14 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 	e.stat.LastAt = now.Format("15:04:05")
 	e.stat.LastErr = ""
 	e.statMu.Unlock()
+
+	// 人工接管（5）：模型调用可能已经跑完。结果不解析、不提权、不写记忆、
+	// 不发送——接管期间「跑完但不生效」是设计内的降级。
+	if e.aiPausedByTakeover(g.OpenID) {
+		logx.InfoCat(logx.CatDecision, "丢弃在途模型结果：该群已进入人工接管",
+			"group", groupLabel(g), "model", res.Model)
+		return
+	}
 
 	// 这次是靠下游兜底才答上来的（前面有目标扛不住这段内容）：
 	// 给真正答上来的模型记一次提权，接下来几轮优先问它，
@@ -1148,10 +1239,24 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 
 	if dec.Act != "say" || !hasContent {
 		// 收图与发不发言无关：闭嘴那轮照样可能看见一张值得留的梗图。
-		e.collectMemes(cfg, dec.Collect, dataURLs, poolSrcs)
+		// 但接管期间不写池——这批图是接管前的上下文，收进来的来源群正被人工接管。
+		if e.aiPausedByTakeover(g.OpenID) {
+			logx.InfoCat(logx.CatDecision, "丢弃在途表情包收编：该群已进入人工接管",
+				"group", groupLabel(g))
+			return
+		}
+		e.collectMemes(cfg, g.OpenID, dec.Collect, dataURLs, poolSrcs)
 		e.statMu.Lock()
 		e.stat.Quiet++
 		e.statMu.Unlock()
+		return
+	}
+
+	// 人工接管（7）：阻止在途决定发送。放在 resolveReplyTarget 之前，
+	// 省掉一次成员表遍历。
+	if e.aiPausedByTakeover(g.OpenID) {
+		logx.InfoCat(logx.CatDecision, "丢弃在途决定：该群已进入人工接管",
+			"group", groupLabel(g))
 		return
 	}
 
@@ -1161,15 +1266,24 @@ func (e *Engine) decide(cfg config.Config, g *memory.Group, trigger, triggerOpen
 
 	sent := e.deliver(cfg, g, blocks, replyToOpenID, eager)
 
-	// 放在发完之后：收图要走一次 MinIO 上传，挂在发消息前面只会让群里多等。
-	e.collectMemes(cfg, dec.Collect, dataURLs, poolSrcs)
-
 	// 统计只认真正送达的条数：Said 原来在发送之前自增，
 	// 一条都没发出去的轮次照样计数，管理端展示的那个数字是虚高的。
+	// 这一步必须排在接管闸之前：deliver 已经发出去的条不能因为接管开始就不计数。
 	if sent > 0 {
 		e.statMu.Lock()
 		e.stat.Said += sent
 		e.statMu.Unlock()
+	}
+
+	// 放在发完之后：收图要走一次 MinIO 上传，挂在发消息前面只会让群里多等。
+	// 接管期间同样不写池：这一轮的决定发生在接管前，来源归属不可靠。
+	// 只跳过收编，不跳过上面的统计与下面的摘要——否则接管开始那一刻
+	// 已送达的条数永远对不上，那一轮的摘要也永远不排程。
+	if e.aiPausedByTakeover(g.OpenID) {
+		logx.InfoCat(logx.CatDecision, "丢弃在途表情包收编：该群已进入人工接管",
+			"group", groupLabel(g))
+	} else {
+		e.collectMemes(cfg, g.OpenID, dec.Collect, dataURLs, poolSrcs)
 	}
 
 	// 滚动摘要异步跑：本轮的回复已经发出去了，摘要慢一点不影响体验
@@ -1368,6 +1482,25 @@ func hasVisionModel(cfg config.Config) bool {
 // Debug 在那里等于不存在。2026-10-02 那次「机器人说看不见图」就是这么查不下去的——
 // 日志里干干净净，什么都看不出来，只能靠猜。抓图失败是**用户可见的功能缺陷**
 // （模型确实少看了东西），必须留下痕迹。
+// capImages 把「给模型看的图」截到上游硬上限，并保持 poolSrcs 与之一一对应。
+//
+// dataURLs 里混了静态图、GIF 拆出的帧和视频帧，poolSrcs 与它逐下标对应
+// （见 decide 里那段注释）。截断时必须两边一起截，否则模型报「第 3 张有梗」
+// 会取到另一张的原图。
+func capImages(dataURLs, poolSrcs []string) ([]string, []string) {
+	if len(dataURLs) <= maxImagesPerRequest {
+		return dataURLs, poolSrcs
+	}
+	dataURLs = dataURLs[:maxImagesPerRequest]
+	if len(poolSrcs) > maxImagesPerRequest {
+		poolSrcs = poolSrcs[:maxImagesPerRequest]
+	}
+	return dataURLs, poolSrcs
+}
+
+// fetchImages 抓取并压缩图片；limit 管的是「给几张原图」，
+// GIF 的拆帧数由 gifFrames 单独决定（见下方注释），所以这里的 limit
+// 只用来提前结束遍历，最终总量由 capImages 兜底。
 func (e *Engine) fetchImages(urls []string, limit, maxSide, gifFrames int) ([]string, []string) {
 	out := make([]string, 0, limit)
 	srcs := make([]string, 0, limit)
@@ -1417,6 +1550,10 @@ func (e *Engine) maybeSummarize(cfg config.Config, g *memory.Group) {
 	// 前面的闸门全都拦不住它，而它会直接调 router.Chat。
 	// 下面那个 allowCall 只看预算，不看总开关，补不了这一课。
 	if cfg.Paused {
+		return
+	}
+	// 人工接管（11）：摘要也是模型调用，接管期间不新开。
+	if e.aiPausedByTakeover(g.OpenID) {
 		return
 	}
 	every := cfg.Brain.SummaryEvery
@@ -1488,6 +1625,13 @@ func (e *Engine) maybeSummarize(cfg config.Config, g *memory.Group) {
 	e.stat.PromptTokens += int64(res.PromptTokens)
 	e.stat.OutputTokens += int64(res.OutputTokens)
 	e.statMu.Unlock()
+	// 人工接管（12）：摘要模型可能已经跑完。接管开始后不写回——
+	// 这段提要描述的是接管前的聊天，写进去会让下一轮模型以为自己在场。
+	if e.aiPausedByTakeover(g.OpenID) {
+		logx.InfoCat(logx.CatDecision, "丢弃在途摘要：该群已进入人工接管",
+			"group", groupLabel(g))
+		return
+	}
 	g.SetSummary(summary)
 	logx.Info("已更新前文提要", "group", groupLabel(g), "长度", len([]rune(summary)))
 }
@@ -1540,6 +1684,14 @@ func (e *Engine) deliver(cfg config.Config, g *memory.Group, blocks []Block, rep
 	lead += time.Duration(rand.Intn(400)) * time.Millisecond
 	time.Sleep(lead)
 
+	// 人工接管（9）：首条之前的犹豫期里管理员可能已经打开窗口。
+	// 这里再判一次，避免「开启接管后还先发一条」。
+	if e.aiPausedByTakeover(g.OpenID) {
+		logx.InfoCat(logx.CatDecision, "停止在途发言：该群已进入人工接管",
+			"group", groupLabel(g), "位置", "首块发送前")
+		return 0
+	}
+
 	var sentTexts []string
 	sent := 0
 	imgUsed := 0
@@ -1550,6 +1702,13 @@ func (e *Engine) deliver(cfg config.Config, g *memory.Group, blocks []Block, rep
 	}
 
 	for i, b := range plan {
+		// 人工接管（10）：逐块检查。已发出的块收不回来，剩余的直接丢弃；
+		// 最多多出一块，这是设计文档接受的降级。
+		if e.aiPausedByTakeover(g.OpenID) {
+			logx.InfoCat(logx.CatDecision, "停止在途发言：该群已进入人工接管",
+				"group", groupLabel(g), "已发", i, "总块数", len(plan))
+			break
+		}
 		if i > 0 {
 			prev := plan[i-1]
 			time.Sleep(segDelay(cfg, prev.C, eager, i, len(plan)))
@@ -1729,6 +1888,14 @@ func (e *Engine) deflect(cfg config.Config, g *memory.Group, atMe bool) {
 	}
 	logx.InfoCat(logx.CatSpeak, "内容被上游拒绝，已发兜底话术",
 		"group", groupLabel(g), "场景", kind, "内容", truncate(line, 40))
+	// 人工接管（13）：上游拒绝后也不发兜底话术。推进 lastSpeak，
+	// 防止接管解除后立刻对着一堆旧消息重试。
+	if e.aiPausedByTakeover(g.OpenID) {
+		logx.InfoCat(logx.CatDecision, "丢弃兜底话术：该群已进入人工接管",
+			"group", groupLabel(g))
+		g.MarkAttempted()
+		return
+	}
 	e.speak(cfg, g, line, "")
 }
 

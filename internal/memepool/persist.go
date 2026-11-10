@@ -19,14 +19,17 @@ type snapshot struct {
 }
 
 type snapshotEntry struct {
-	ID        int64   `json:"id"`
-	ObjectKey string  `json:"object_key"`
-	Descr     string  `json:"descr"`
-	AddedAt   int64   `json:"added_at"` // unix 秒
-	Uses      int     `json:"uses"`
-	LastUsed  int64   `json:"last_used"`
-	Quality   float64 `json:"quality"`
-	ExpiresAt int64   `json:"expires_at"`
+	ID        int64  `json:"id"`
+	ObjectKey string `json:"object_key"`
+	Descr     string `json:"descr"`
+	// SourceGroup 是来源群。旧文件没有这个字段，读出来是空串——
+	// 视为来源未知，照常参与优选，不能因为加字段把旧池子冻住。
+	SourceGroup string  `json:"source_group,omitempty"`
+	AddedAt     int64   `json:"added_at"` // unix 秒
+	Uses        int     `json:"uses"`
+	LastUsed    int64   `json:"last_used"`
+	Quality     float64 `json:"quality"`
+	ExpiresAt   int64   `json:"expires_at"`
 }
 
 const snapshotVersion = 1
@@ -71,14 +74,15 @@ func (p *Pool) Load(path string) error {
 			continue
 		}
 		p.memes[e.ID] = &Meme{
-			ID:        e.ID,
-			ObjectKey: e.ObjectKey,
-			Descr:     e.Descr,
-			AddedAt:   time.Unix(e.AddedAt, 0),
-			Uses:      e.Uses,
-			LastUsed:  time.Unix(e.LastUsed, 0),
-			Quality:   e.Quality,
-			ExpiresAt: time.Unix(e.ExpiresAt, 0),
+			ID:          e.ID,
+			ObjectKey:   e.ObjectKey,
+			Descr:       e.Descr,
+			SourceGroup: e.SourceGroup,
+			AddedAt:     time.Unix(e.AddedAt, 0),
+			Uses:        e.Uses,
+			LastUsed:    time.Unix(e.LastUsed, 0),
+			Quality:     e.Quality,
+			ExpiresAt:   time.Unix(e.ExpiresAt, 0),
 		}
 		p.byKey[e.ObjectKey] = e.ID
 		if e.ID >= p.nextID {
@@ -96,14 +100,15 @@ func (p *Pool) Save(path string) error {
 	out := make([]snapshotEntry, 0, len(p.memes))
 	for _, m := range p.memes {
 		out = append(out, snapshotEntry{
-			ID:        m.ID,
-			ObjectKey: m.ObjectKey,
-			Descr:     m.Descr,
-			AddedAt:   m.AddedAt.Unix(),
-			Uses:      m.Uses,
-			LastUsed:  m.LastUsed.Unix(),
-			Quality:   m.Quality,
-			ExpiresAt: m.ExpiresAt.Unix(),
+			ID:          m.ID,
+			ObjectKey:   m.ObjectKey,
+			Descr:       m.Descr,
+			SourceGroup: m.SourceGroup,
+			AddedAt:     m.AddedAt.Unix(),
+			Uses:        m.Uses,
+			LastUsed:    m.LastUsed.Unix(),
+			Quality:     m.Quality,
+			ExpiresAt:   m.ExpiresAt.Unix(),
 		})
 	}
 	p.mu.Unlock()

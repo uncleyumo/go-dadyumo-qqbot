@@ -37,9 +37,9 @@ var forbiddenPhrases = []struct{ phrase, why string }{
 func TestTriggerNeverJudgesIntent(t *testing.T) {
 	// 遍历所有布尔组合：只有触发条件不同，措辞不该出现判断
 	cases := []struct {
-		name                                                 string
+		name                                               string
 		atMe, nameCalled, fromMaster, question, replyToBot bool
-		faceSpam, atOthers, atAll                           bool
+		faceSpam, atOthers, atAll                          bool
 	}{
 		{"全 false", false, false, false, false, false, false, false, false},
 		{"被@", true, false, false, false, false, false, false, false},

@@ -105,6 +105,59 @@ func TestPriorityYieldsWhenMainFails(t *testing.T) {
 	t.Logf("主力连续失败 6 次，其中 %d 次由兜底接管", rescued)
 }
 
+// TestUnhealthyTargetDemotedBelowHealthy 连续失败达到阈值的目标不再享受
+// priority 硬分层：它排到低优先级但健康的目标之后。成功一次后 ConsecFail
+// 归零，自动回到原档位。
+//
+// 光靠冷却不够：冷却最长 5 分钟，而群聊消息间隔常常比它长，
+// 一个连续失败的主力每次都会重新排第一，把整条兜底链堵在它身上。
+func TestUnhealthyTargetDemotedBelowHealthy(t *testing.T) {
+	st := testStore(t, `"endpoints":[`+epJSONWithPriority("E1", "http://x", "main:9", "backup:1")+`]`)
+	r := NewRouter(st)
+
+	r.mu.RLock()
+	main := r.targets["E1|main"]
+	r.mu.RUnlock()
+	if main == nil {
+		t.Fatal("找不到目标 main")
+	}
+
+	// 未到阈值时仍然是主力优先
+	main.mu.Lock()
+	main.h.Total = demoteAfterConsecFail - 1
+	main.h.Fails = demoteAfterConsecFail - 1
+	main.h.ConsecFail = demoteAfterConsecFail - 1
+	main.h.LastUsed = time.Now()
+	main.mu.Unlock()
+	if c := r.PreviewChain(); len(c.Chain) < 2 || c.Chain[0].Model != "main" {
+		t.Fatalf("未到降级阈值时应仍走主力: %+v", c.Chain)
+	}
+
+	// 达到阈值后沉底
+	main.mu.Lock()
+	main.h.Total = demoteAfterConsecFail
+	main.h.Fails = demoteAfterConsecFail
+	main.h.ConsecFail = demoteAfterConsecFail
+	main.h.LastUsed = time.Now()
+	main.mu.Unlock()
+	c := r.PreviewChain()
+	if len(c.Chain) < 2 {
+		t.Fatalf("链路应有两个目标: %+v", c.Chain)
+	}
+	if c.Chain[0].Model != "backup" {
+		t.Errorf("连续失败 %d 次后应排到健康目标之后，实际第一名是 %q",
+			demoteAfterConsecFail, c.Chain[0].Model)
+	}
+
+	// 过了观察窗口，重新给它一次机会，避免降级变成永久下线
+	main.mu.Lock()
+	main.h.LastUsed = time.Now().Add(-2 * demoteProbation)
+	main.mu.Unlock()
+	if c := r.PreviewChain(); len(c.Chain) < 2 || c.Chain[0].Model != "main" {
+		t.Errorf("过了观察窗口应重新参与正常排序: %+v", c.Chain)
+	}
+}
+
 // TestPriorityDefaultsAndClamped 缺省为 0，负数被夹到 0
 func TestPriorityDefaultsAndClamped(t *testing.T) {
 	st := testStore(t, `"endpoints":[`+epJSON("A", "http://x", "m1")+`]`)

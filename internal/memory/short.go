@@ -152,7 +152,8 @@ type Group struct {
 	recent      []Line
 	lastSpeak   time.Time
 	lastText    string
-	consecutive int // 连续主动发言次数
+	lastTexts   []string // 近几条发言，供提示词看见自己的循环
+	consecutive int      // 连续主动发言次数
 	lastUserAt  time.Time
 	lastAtHit   time.Time // 上次被 @ / 被点名的时间，用于在线宽限
 	mutedUntil  time.Time
@@ -475,12 +476,35 @@ func (g *Group) MarkBotSpoke(text string) {
 	g.mu.Lock()
 	g.lastSpeak = time.Now()
 	g.lastText = text
+	// 保留近 3 条，让提示词能看见自己的脑回路循环；再多就挤 token。
+	g.lastTexts = append(g.lastTexts, text)
+	if len(g.lastTexts) > 3 {
+		g.lastTexts = g.lastTexts[len(g.lastTexts)-3:]
+	}
 	g.consecutive++
 	g.mu.Unlock()
 }
 
-// MarkAttempted 记录「尝试过发言，但一条都没送出去」。
+// MarkManualSpoke 管理员手动发言后更新「我刚说过什么」。
 //
+// 只更新 lastSpeak / lastText / lastTexts，**不增加 consecutive**：
+// 人工发言不是 AI 连着开口，把计数加上去会让它在接管解除后误以为
+// 自己刚刷过屏而闭嘴。但完全跳过也不行——looksLikeReplyToBot 与提示词里的
+// 「你刚刚说过」会停在接管前的旧值。
+func (g *Group) MarkManualSpoke(text string) {
+	g.mu.Lock()
+	g.lastSpeak = time.Now()
+	g.lastText = text
+	if text != "" {
+		g.lastTexts = append(g.lastTexts, text)
+		if len(g.lastTexts) > 3 {
+			g.lastTexts = g.lastTexts[len(g.lastTexts)-3:]
+		}
+	}
+	g.mu.Unlock()
+}
+
+// MarkAttempted 记录「尝试过发言，但一条都没送出去」。
 // 为什么需要它：QQ 侧限流、权限变更这类失败是持续性的，不推进状态的话
 // 下一条消息进来会立刻再打一次，历史上有过 19 分钟内 20 次决策、
 // 76 次注定失败的发送、群里一个字都没出现的记录。
@@ -541,6 +565,18 @@ func (g *Group) LastText() string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.lastText
+}
+
+// LastTexts 近几条发言（旧→新，最多 3 条），给提示词做反路径依赖。
+func (g *Group) LastTexts() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.lastTexts) == 0 {
+		return nil
+	}
+	out := make([]string, len(g.lastTexts))
+	copy(out, g.lastTexts)
+	return out
 }
 
 // MutedUntil 被管理员要求闭嘴的截止时间

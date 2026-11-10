@@ -1,6 +1,7 @@
 package qqapi
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
@@ -10,6 +11,10 @@ const (
 	passiveTTL    = 5 * time.Minute
 	passiveMaxUse = 5
 )
+
+// anchorWindowMax 是只读快照一次最多返回的条数。
+// 与建池时的 keep 无关：keep 可能调大，但管理端只看最近 20 条就够。
+const anchorWindowMax = 20
 
 type anchor struct {
 	msgID string
@@ -47,6 +52,9 @@ type AnchorPool struct {
 	mu   sync.Mutex
 	m    map[string][]*anchor
 	keep int
+	// now 是取当前时间的函数，默认 time.Now；测试可以换成冻结时钟，
+	// 用来稳定地构造「已过期」而不用真的 sleep 5 分钟。
+	now func() time.Time
 }
 
 // NewAnchorPool 创建锚点池，keep 为每个群保留的锚点上限
@@ -54,7 +62,15 @@ func NewAnchorPool(keep int) *AnchorPool {
 	if keep <= 0 {
 		keep = 20
 	}
-	return &AnchorPool{m: map[string][]*anchor{}, keep: keep}
+	return &AnchorPool{m: map[string][]*anchor{}, keep: keep, now: time.Now}
+}
+
+// nowTime 取当前时间。零值 AnchorPool 没走构造函数时退回 time.Now，避免空指针。
+func (p *AnchorPool) nowTime() time.Time {
+	if p.now == nil {
+		return time.Now()
+	}
+	return p.now()
 }
 
 // Add 记录一条可用于被动回复的用户消息。
@@ -84,7 +100,7 @@ func (p *AnchorPool) Add(groupOpenID, msgID, senderOpenID, senderName, refIdx st
 		}
 	}
 	list = append(list, &anchor{msgID: msgID, sender: senderOpenID, name: senderName,
-		refIdx: refIdx, ts: time.Now()})
+		refIdx: refIdx, ts: p.nowTime()})
 	if len(list) > p.keep {
 		list = list[len(list)-p.keep:]
 	}
@@ -115,14 +131,17 @@ func (p *AnchorPool) PickAndReserve(groupOpenID, preferSender string) (msgID, re
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	now := time.Now()
+	now := p.nowTime()
 	alive := make([]*anchor, 0, len(p.m[groupOpenID]))
 	for _, a := range p.m[groupOpenID] {
 		if now.Sub(a.ts) <= passiveTTL && a.used < passiveMaxUse {
 			alive = append(alive, a)
 		}
 	}
-	p.m[groupOpenID] = alive
+	// 注意这里**不再把 p.m[groupOpenID] 覆盖成 alive**：
+	// 只读快照（Window/List）要靠过期与用满的条目区分
+	// no_anchor / expired / quota_exhausted，提前删掉就只剩 no_anchor。
+	// 容量仍由 Add 里的 keep 上限约束，不会无限增长。
 	if len(alive) == 0 {
 		return "", "", 0, false, false
 	}
@@ -172,7 +191,7 @@ func (p *AnchorPool) Stats() map[string]int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := make(map[string]int, len(p.m))
-	now := time.Now()
+	now := p.nowTime()
 	for g, list := range p.m {
 		n := 0
 		for _, a := range list {
@@ -183,4 +202,115 @@ func (p *AnchorPool) Stats() map[string]int {
 		out[g] = n
 	}
 	return out
+}
+
+// AnchorInfo 是一条用户消息锚点的只读副本。
+//
+// 字段与设计文档 §4.6 的 takeover.AnchorSnapshot 一一对应。快照故意不带
+// refIdx / seq：它只供管理端展示与发送前预检，真正发送仍由 PickAndReserve
+// 在锁内重新选点并占用额度，额度以实际占用为准。
+type AnchorInfo struct {
+	MsgID        string `json:"msg_id"`
+	SenderOpenID string `json:"sender_openid"`
+	SenderName   string `json:"sender_name"`
+	Used         int    `json:"used"`
+	MaxUse       int    `json:"max_use"`
+	Alive        bool   `json:"alive"`      // 仍在 5 分钟 TTL 内且 used < max_use
+	ExpiresAt    int64  `json:"expires_at"` // unix 秒
+}
+
+// snapshotLocked 把内部锚点转成只读副本，调用方必须已持有 p.mu。
+func (p *AnchorPool) snapshotLocked(a *anchor, now time.Time) AnchorInfo {
+	return AnchorInfo{
+		MsgID:        a.msgID,
+		SenderOpenID: a.sender,
+		SenderName:   a.name,
+		Used:         a.used,
+		MaxUse:       passiveMaxUse,
+		Alive:        now.Sub(a.ts) <= passiveTTL && a.used < passiveMaxUse,
+		ExpiresAt:    a.ts.Add(passiveTTL).Unix(),
+	}
+}
+
+// Window 返回池里保留的全部锚点，最多 anchorWindowMax 条。
+//
+// 排序：preferSender 的存活锚点最前，其次是其余存活锚点，过期/用满的排最后；
+// 同一档内按最新在前。过期与用满的条目**要保留**，否则管理端无法区分
+// no_anchor / expired / quota_exhausted 三种拒绝原因。
+func (p *AnchorPool) Window(groupOpenID, preferSender string) []AnchorInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	list := p.m[groupOpenID]
+	now := p.nowTime()
+	out := make([]AnchorInfo, 0, len(list))
+	for i := len(list) - 1; i >= 0; i-- {
+		out = append(out, p.snapshotLocked(list[i], now))
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return anchorRank(out[i], preferSender) < anchorRank(out[j], preferSender)
+	})
+	if len(out) > anchorWindowMax {
+		out = out[:anchorWindowMax]
+	}
+	return out
+}
+
+// anchorRank 是 Window 的排序档位：0 指发送人的存活锚点，1 其他存活锚点，2 过期或用满。
+func anchorRank(a AnchorInfo, preferSender string) int {
+	switch {
+	case a.Alive && preferSender != "" && a.SenderOpenID == preferSender:
+		return 0
+	case a.Alive:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// List 返回池里保留的全部锚点，纯按最新在前，含已用满与已过期条目，
+// 最多 anchorWindowMax 条。需要「存活优先、指定发送人优先」时用 Window。
+func (p *AnchorPool) List(groupOpenID string) []AnchorInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	list := p.m[groupOpenID]
+	now := p.nowTime()
+	out := make([]AnchorInfo, 0, len(list))
+	for i := len(list) - 1; i >= 0 && len(out) < anchorWindowMax; i-- {
+		out = append(out, p.snapshotLocked(list[i], now))
+	}
+	return out
+}
+
+// KnownGroups 返回曾经登记过锚点的群，即使当前已经没有任何存活锚点。
+// 排序固定，方便调用方（EndAll）稳定遍历，也让测试可以逐项断言。
+func (p *AnchorPool) KnownGroups() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	out := make([]string, 0, len(p.m))
+	for g := range p.m {
+		out = append(out, g)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// 以下是 Client 上的转发方法，供 main 里的 takeover.AnchorSource 适配器直接调用，
+// 调用方不需要知道 AnchorPool 这个类型。
+
+// Window 转发锚点池的只读快照，语义见 AnchorPool.Window。
+func (c *Client) Window(groupOpenID, preferSender string) []AnchorInfo {
+	return c.anchors.Window(groupOpenID, preferSender)
+}
+
+// ListAnchors 转发锚点池的全部锚点快照，语义见 AnchorPool.List。
+func (c *Client) ListAnchors(groupOpenID string) []AnchorInfo {
+	return c.anchors.List(groupOpenID)
+}
+
+// AnchorGroups 转发「登记过锚点的群」，语义见 AnchorPool.KnownGroups。
+func (c *Client) AnchorGroups() []string {
+	return c.anchors.KnownGroups()
 }

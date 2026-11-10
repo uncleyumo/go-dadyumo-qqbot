@@ -37,3 +37,27 @@ func TestPickImagesDedupAndSeparateSenders(t *testing.T) {
 		t.Fatalf("应去重并分人统计, got %#v", got)
 	}
 }
+
+// capImages 必须把「给模型看的图」截到上游硬上限，并且 poolSrcs 跟着截，
+// 否则模型说「第 3 张有梗」时池子会存进另一张的原图。
+func TestCapImagesKeepsAlignment(t *testing.T) {
+	urls := []string{"u1", "u2", "u3", "u4", "u5", "u6", "u7"}
+	srcs := []string{"s1", "s2", "s3", "s4", "s5", "s6", "s7"}
+
+	gotURLs, gotSrcs := capImages(urls, srcs)
+	if len(gotURLs) != maxImagesPerRequest || len(gotSrcs) != maxImagesPerRequest {
+		t.Fatalf("应截到 %d 张，实际 urls=%d srcs=%d", maxImagesPerRequest, len(gotURLs), len(gotSrcs))
+	}
+	for i := range gotURLs {
+		if gotURLs[i] != urls[i] || gotSrcs[i] != srcs[i] {
+			t.Fatalf("第 %d 张错位: url=%q src=%q", i, gotURLs[i], gotSrcs[i])
+		}
+	}
+
+	// 不超限时原样返回，不做无谓的复制或截断
+	short := []string{"a", "b"}
+	gotURLs, gotSrcs = capImages(short, short)
+	if len(gotURLs) != 2 || len(gotSrcs) != 2 || gotURLs[1] != "b" {
+		t.Fatalf("未超限时应原样返回，实际 %#v / %#v", gotURLs, gotSrcs)
+	}
+}

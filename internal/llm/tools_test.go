@@ -204,6 +204,31 @@ func TestResponsesToolsKeyOrderForCache(t *testing.T) {
 	}
 }
 
+// chat/completions 的 tools 必须带 {"type":"function","function":{...}} 外壳。
+//
+// 2026-11-04 生产事故：chat 分支发的是 Responses 的扁平形状，严格校验的
+// 上游回 400（new-api 包装成 bad_response_status_code），兜底链在第二个
+// 模型处被 ErrKindBadRequest 截断，3 级以后的模型一次都没被调用过。
+func TestChatToolsPayloadHasFunctionEnvelope(t *testing.T) {
+	view := testView(config.APIChatCompletions)
+	view.BaseURL = "http://x"
+	_, raw, cerr := buildPayload(view, Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+		Tools:    []Tool{{Name: "browse_meme_pool", Description: "d", Parameters: map[string]any{"type": "object"}}},
+	}, 512)
+	if cerr != nil {
+		t.Fatal(cerr)
+	}
+	s := string(raw)
+	if !strings.Contains(s, `"tools":[{"type":"function","function":{"name":"browse_meme_pool"`) {
+		t.Errorf("chat 方言的 tools 缺少 {type:function,function:{...}} 外壳: %s", s)
+	}
+	// 扁平形状（name 直接挂在 tools[0] 上）不能再出现
+	if strings.Contains(s, `"tools":[{"name"`) {
+		t.Errorf("chat 方言不应发 Responses 的扁平 tools 形状: %s", s)
+	}
+}
+
 // 不给工具时不能出现 tools 键——多一个键就多一份字节，白费缓存
 func TestNoToolsNoToolsField(t *testing.T) {
 	view := testView(config.APIResponses)

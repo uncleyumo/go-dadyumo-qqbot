@@ -8,8 +8,8 @@ import (
 // blocks 是「模型说什么」到「实际发什么」之间唯一的闸门。
 // 这些测试锁的是：模型填得很随意时，群里不能出现空白消息、超发、或顺序错乱。
 
-func tb(c string) Block  { return Block{T: BlockTypeText, C: c} }
-func ib(id int64) Block  { return Block{T: BlockTypeImg, ID: id} }
+func tb(c string) Block { return Block{T: BlockTypeText, C: c} }
+func ib(id int64) Block { return Block{T: BlockTypeImg, ID: id} }
 
 // 只有文字时，blocks 为空要回落到 text 字段（兼容旧格式）
 func TestAllowBlocksFallsBackToText(t *testing.T) {

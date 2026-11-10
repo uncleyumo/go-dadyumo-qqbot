@@ -81,6 +81,20 @@ func (h *Health) observeFailure(errMsg string, now time.Time) time.Duration {
 	return backoff
 }
 
+// observeReject 记录一次「上游不接受这份请求」，但不冷却。
+//
+// 400 不是目标掉线：一次上下文超长或工具定义不合法，换目标可能就过了，
+// 把整池推进退避只会让机器人失语。但完全不记也不行——一个每次都 400 的
+// 目标会在面板上永远显示健康，连续失败也就永远攒不起来。折中：
+// 记进健康度（Total/Fails/ConsecFail/成功率），不设 CooldownUntil。
+func (h *Health) observeReject(errMsg string) {
+	h.Total++
+	h.Fails++
+	h.ConsecFail++
+	h.observe(0, 0, 0)
+	h.LastError = errMsg
+}
+
 // observe 更新 EWMA。kind=1 成功，kind=0 失败。
 // 延迟类指标只在成功时更新，避免把「快速失败」误判为「快速响应」。
 func (h *Health) observe(kind float64, ttftMS, latencyMS float64) {

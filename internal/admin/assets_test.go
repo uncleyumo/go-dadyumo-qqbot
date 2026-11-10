@@ -127,3 +127,176 @@ func TestPersonaPanelsSplitIntoFour(t *testing.T) {
 			catch, reply, roast)
 	}
 }
+
+// 主题切换是「head 里尽早执行的内联脚本 + header 按钮 + 点击写回」三处字符串，
+// 少一处就退化成「按钮在但点了不生效」或者「每次刷新闪一下」。
+// 两个页面共用同一个 localStorage key，登录页也必须跟着切换，否则登录后换主题、
+// 退出再登录会看到另一套配色。
+func TestThemeToggleIsWired(t *testing.T) {
+	for _, name := range []string{"assets/index.html", "assets/login.html"} {
+		b, err := assetsFS.ReadFile(name)
+		if err != nil {
+			t.Fatalf("读取 %s 失败: %v", name, err)
+		}
+		html := string(b)
+		for _, want := range []string{
+			`localStorage.getItem('admin-theme')`,
+			`localStorage.setItem('admin-theme', next)`,
+			`document.documentElement.dataset.theme = t`,
+			`prefers-color-scheme: light`,
+			`html[data-theme="light"]`,
+			`color-scheme:light`,
+			`id="theme-toggle"`,
+			`class="i-sun"`,
+			`class="i-moon"`,
+		} {
+			if !strings.Contains(html, want) {
+				t.Errorf("%s 缺少主题切换片段 %q", name, want)
+			}
+		}
+	}
+}
+
+// 深色是默认值，浅色只做变量覆盖。这里钉住几个关键语义变量，
+// 防止以后把颜色直接写回选择器里——那样浅色主题会漏块、看起来一块深一块浅。
+// 接管聊天前端接线（设计文档步骤 8 / T22）。
+//
+// 这些字符串是「页面功能是否真的接上」的唯一回归依据：按钮点了调哪个函数、
+// 小窗轮询打哪个接口、刷新复活读哪个 sessionStorage key。
+// 少一处不会报错，只会静默失效——症状是「按钮在但点了没反应」或「刷新后接管断了」。
+func TestTakeoverUIWired(t *testing.T) {
+	b, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("读取页面失败: %v", err)
+	}
+	html := string(b)
+
+	for _, want := range []string{
+		`id="tk"`,                     // 接管小窗
+		`data-mode="window"`,          // 三档默认选中 window
+		`/api/takeover/mode`,          // 切档
+		`/api/takeover/lease`,         // acquire / beat / release
+		`/api/takeover/window`,        // 只读快照
+		`/api/takeover/members`,       // @ 成员
+		`/api/takeover/send`,          // 发送文字
+		`/api/takeover/meme`,          // 发送表情
+		`/api/takeover/end_all`,       // 全部恢复正常
+		`tk_started`,                  // 刷新复活标记
+		`tk_epoch`,                    // 旧页面识别
+		`sendBeacon`,                  // pagehide 释放
+		`addEventListener('pagehide'`, // 页面卸载
+		`visibilitychange`,            // 隐藏降频
+		`sessionStorage`,              // 租约持久化
+		`applyTakeoverBadges(`,        // 徽标
+		`data-tk-badge=`,              // 群卡片徽标挂载点
+		`id="takeover-banner"`,        // 顶部常驻横幅
+		`openTakeover(`,               // 群卡片按钮入口
+		`closeTakeover(`,              // 点 × 释放
+		`endAllTakeover(`,             // 全部恢复正常
+		`id="tk-count"`,               // mm:ss 倒计时
+		`id="tk-bar"`,                 // 进度条
+		`id="tk-reacquire"`,           // 连接断开后手动重连
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("接管前端缺少片段 %q", want)
+		}
+	}
+	// 群卡片必须真的挂上「接管窗口」按钮，而不是只在别处出现函数名
+	if !strings.Contains(html, `onclick="openTakeover('`) {
+		t.Error("群卡片没有「接管窗口」按钮（openTakeover 永远不会被调用）")
+	}
+	// 大号倒计时必须绑「这条消息的被动回复有效期」，不能绑 10 秒租约 TTL：
+	// 租约每 2 秒续一次，显示十秒倒计时会让人误以为消息快过期。
+	if !strings.Contains(html, "a.expires_at") {
+		t.Error("接管倒计时没有绑定 selected.expires_at")
+	}
+}
+
+// 昵称、群别名、消息内容都是用户可控文本。接管小窗必须用 createElement +
+// textContent 渲染，绝不能把值拼进 innerHTML——一个恶意昵称就能注入脚本。
+func TestTakeoverRendersUserTextSafely(t *testing.T) {
+	b, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("读取页面失败: %v", err)
+	}
+	html := string(b)
+
+	// 正向：这三类是接管小窗里唯一的用户文本出口，必须走 textContent
+	for _, want := range []string{
+		`b.textContent = m.name || m.card || '群友'`,
+		`body.textContent = l.content ?? l.text ?? ''`,
+		`who.textContent = (isBot ? '机器人' : (l.name || '群友')) + '：'`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("接管小窗缺少安全文本写入 %q（用户昵称/消息必须用 textContent）", want)
+		}
+	}
+	// 反向：这些插值一旦出现在 HTML 模板里就是注入点
+	for _, bad := range []string{`${m.name}`, `${m.card}`, `${l.content}`, `${l.text}`} {
+		if strings.Contains(html, bad) {
+			t.Errorf("用户可控文本被拼进 HTML 模板：%q", bad)
+		}
+	}
+	// 群名/别名进入标题与横幅时也必须转义
+	if !strings.Contains(html, `esc(items.join('、'))`) {
+		t.Error("接管横幅没有对群名做 esc 转义")
+	}
+}
+
+// 移动端与主题：小窗铺满、按钮换行、成员 chip 横滚、表情网格自适应；
+// 颜色只用主题变量，明暗两套都能读。
+func TestTakeoverMobileAndTheme(t *testing.T) {
+	b, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("读取页面失败: %v", err)
+	}
+	html := string(b)
+
+	for _, want := range []string{
+		`#tk{position:fixed;inset:0;background:var(--overlay)`,
+		`#tk .box{background:var(--card)`,
+		`#tk .seg{display:flex`,                                    // 三档等宽
+		`#tk .tk-chips{display:flex;gap:6px;overflow-x:auto`,       // 成员 chip 横滚
+		`grid-template-columns:repeat(auto-fill,minmax(56px,1fr))`, // 表情网格自适应
+		`#tk .box{width:100%;max-width:none;height:100%`,           // 小屏铺满
+		`#tk .seg{flex-wrap:wrap}`,                                 // 小屏按钮换行
+		`@media (max-width:768px)`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("接管小窗缺少移动端/主题片段 %q", want)
+		}
+	}
+}
+
+// 深色是默认值，浅色只做变量覆盖。这里钉住几个关键语义变量，
+// 防止以后把颜色直接写回选择器里——那样浅色主题会漏块、看起来一块深一块浅。
+func TestIndexThemeVariablesExist(t *testing.T) {
+	b, err := assetsFS.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("读取页面失败: %v", err)
+	}
+	html := string(b)
+	for _, want := range []string{
+		`:root{`,
+		`--surface-3:#222836`,
+		`--surface-2:#14171e`,
+		`--log-line:#1d222c`,
+		`--line-strong:#3a4252`,
+		`--cat-bg:#232a37`,
+		`--chart-grid:`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("页面缺少深色主题变量 %q", want)
+		}
+	}
+	// 硬编码底色必须从选择器里消失，只允许留在变量定义里
+	for _, gone := range []string{
+		`.tab.on{background:#222836`,
+		`background:#1d222c`,
+		`input,select,textarea{background:#0d1016`,
+	} {
+		if strings.Contains(html, gone) {
+			t.Errorf("选择器里仍有硬编码颜色 %q，应改用变量", gone)
+		}
+	}
+}

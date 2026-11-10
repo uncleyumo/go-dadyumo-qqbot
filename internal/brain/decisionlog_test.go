@@ -178,7 +178,7 @@ func TestScheduleGateLogsInSource(t *testing.T) {
 	src := string(b)
 	i := strings.Index(src, "本次摇骰子没上线")
 	if i < 0 {
-		t.Fatal("fire 里找不到「本次摇骰子没上线」这行日志——"+
+		t.Fatal("fire 里找不到「本次摇骰子没上线」这行日志——" +
 			"在线率闸的判定过程必须留下痕迹")
 	}
 	chunk := src[i:min(len(src), i+400)]
@@ -232,7 +232,6 @@ func TestScheduleAllowWrapsDecide(t *testing.T) {
 		t.Error("点名宽限期内必须放行")
 	}
 }
-
 
 // TestQuietRoundLogsExactlyOnce 一次模型调用必须在日志里留下**恰好一条**决策。
 //
@@ -318,6 +317,7 @@ func TestMutedGroupGateIsVisible(t *testing.T) {
 		}
 	}
 }
+
 // TestQuietFallbackWarnsAndKeepsOS 降级闭嘴那一路必须既留痕又保住 os。
 //
 // 2026-10-03 生产实况：模型只吐了 <os> 就被截断时，日志里是一条
@@ -369,7 +369,7 @@ func TestQuietFallbackWarnsAndKeepsOS(t *testing.T) {
 // 这条一开始写的是「fallback+say 不该标注」，跑完发现是错的：parse.go
 // 三条降级出口全都没有模型给 act——quiet 那两条是硬编码 "quiet"，
 // 而 say 这条的 `Act: "say"` 连同 `Tone: "roast"` 一起是硬编码的
-//（parse.go:84）。所以「解析器猜的」对三条降级出口一视同仁，
+// （parse.go:84）。所以「解析器猜的」对三条降级出口一视同仁，
 //
 // 这比「quiet 才标注」更诚实：降级轮次里模型的 tone、对象、记忆全都丢了，
 // 它唯一表达出来的就是 os 那一句话。看到「解析器猜的」就知道

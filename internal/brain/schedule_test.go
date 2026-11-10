@@ -82,16 +82,16 @@ func TestDaysMatch(t *testing.T) {
 		now  time.Time
 		want bool
 	}{
-		{"", sat, true},        // 空 = 每天，旧配置语义不变
-		{"1-5", wed, true},     // 工作日
-		{"1-5", sat, false},    // 周末不算工作日
-		{"1-5", sun, false},    // 周日是 7，不是 0——写成 0-4 的偏移就栽在这
+		{"", sat, true},     // 空 = 每天，旧配置语义不变
+		{"1-5", wed, true},  // 工作日
+		{"1-5", sat, false}, // 周末不算工作日
+		{"1-5", sun, false}, // 周日是 7，不是 0——写成 0-4 的偏移就栽在这
 		{"6,7", sat, true},
 		{"6,7", sun, true},
 		{"7", sun, true},
 		{"7", wed, false},
 		{"3", wed, true},
-		{" 1-5 ", wed, true},   // 容忍空格
+		{" 1-5 ", wed, true},    // 容忍空格
 		{"mon-fri", wed, false}, // 解析不出来 → 该窗口永不命中，而不是「每天生效」
 		{"0-5", wed, false},     // 0 越界
 		{"5-1", wed, false},     // 反区间不绕回

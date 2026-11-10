@@ -75,7 +75,7 @@ func TestOversizeErrorMentionsTheLimit(t *testing.T) {
 	if err == nil {
 		t.Fatal("应报错")
 	}
-	want := strconv.Itoa(MaxBytes >> 20) + " MB"
+	want := strconv.Itoa(MaxBytes>>20) + " MB"
 	if !strings.Contains(err.Error(), want) {
 		t.Errorf("报错里应写明实际上限 %s，否则排查时得回去翻代码，got: %v", want, err)
 	}

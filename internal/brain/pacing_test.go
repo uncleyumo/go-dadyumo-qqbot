@@ -187,7 +187,7 @@ func TestRampFloorKeepsLastSegmentApart(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		d := segDelay(cfg, prev, false, 4, 5)
 		if d <= 0 {
-			t.Fatalf("间隔归零了：平台会把两条消息合并成一条，"+
+			t.Fatalf("间隔归零了：平台会把两条消息合并成一条，" +
 				"模型本来想分开发的文字+表情包就没了")
 		}
 		if d < 100*time.Millisecond {
